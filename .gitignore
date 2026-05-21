@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+
+.venv/
+.venv-ft/
+
+.vscode/
+
+*.egg-info/
+
+.ruff_cache/
+.mypy_cache/
+
+.DS_Store
