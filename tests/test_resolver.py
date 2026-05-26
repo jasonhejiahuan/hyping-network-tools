@@ -3,12 +3,14 @@ import unittest
 from ipaddress import IPv4Address
 from unittest.mock import patch
 
+from hyping.discovery.arp import ARPScanError
 from hyping.discovery.resolver import (
     AmbiguousDeviceError,
     DeviceNotFoundError,
     find_devices,
     find_one_device,
     locate_device,
+    locate_devices,
     normalize_mac,
     resolve_ipv4_addresses,
 )
@@ -54,6 +56,20 @@ class ResolverTests(unittest.TestCase):
         )
         self.assertEqual(find_devices([device], note="door"), [])
 
+    def test_find_devices_supports_partial_hostname(self) -> None:
+        device = Device(
+            ip=IPv4Address("192.168.11.212"),
+            mac="a2:08:71:1c:1a:8e",
+            hostname="haozdeMacBook-Air.local",
+            note="昊的电脑",
+        )
+
+        self.assertEqual(
+            find_devices([device], hostname="hao", partial_hostname=True),
+            [device],
+        )
+        self.assertEqual(find_devices([device], hostname="hao"), [])
+
     def test_find_one_rejects_ambiguous_matches(self) -> None:
         devices = [
             Device(
@@ -87,6 +103,126 @@ class ResolverTests(unittest.TestCase):
         )
 
         self.assertEqual(located, device)
+
+    def test_locate_device_uses_partial_hostname_known_device(self) -> None:
+        device = Device(
+            ip=IPv4Address("192.168.11.212"),
+            mac="a2:08:71:1c:1a:8e",
+            hostname="haozdeMacBook-Air.local",
+            note="昊的电脑",
+        )
+
+        with patch(
+            "hyping.discovery.resolver._candidate_hostnames_from_mdns_text",
+            return_value=[],
+        ):
+            located = locate_device(
+                hostname="hao",
+                devices=[device],
+                partial_hostname=True,
+            )
+
+        self.assertEqual(located, device)
+
+    def test_locate_devices_returns_multiple_partial_hostname_matches(self) -> None:
+        devices = [
+            Device(
+                ip=IPv4Address("192.168.10.210"),
+                mac="aa:ba:36:4d:1a:6b",
+                hostname="IvandeMacBook-Air.local",
+            ),
+            Device(
+                ip=IPv4Address("192.168.10.199"),
+                mac="ce:a0:4a:b2:89:fd",
+                hostname="liuyilingdeMacBook-Air.local",
+            ),
+        ]
+
+        with patch(
+            "hyping.discovery.resolver._candidate_hostnames_from_mdns_text",
+            return_value=[],
+        ):
+            self.assertEqual(
+                locate_devices(
+                    hostname="MacBook-Air",
+                    devices=devices,
+                    partial_hostname=True,
+                ),
+                devices,
+            )
+
+    def test_locate_device_uses_partial_hostname_mdns_discovery(self) -> None:
+        with (
+            patch(
+                "hyping.discovery.resolver._candidate_hostnames_from_mdns_text",
+                return_value=["IvandeMacBook-Air.local"],
+            ),
+            patch(
+                "hyping.discovery.resolver.resolve_ipv4_addresses",
+                side_effect=[
+                    [],
+                    [IPv4Address("192.168.10.210")],
+                ],
+            ),
+            patch(
+                "hyping.discovery.resolver._read_arp_cache",
+                return_value="aa:ba:36:4d:1a:6b",
+            ),
+        ):
+            located = locate_device(
+                hostname="Ivan",
+                partial_hostname=True,
+            )
+
+        self.assertEqual(located.ip, IPv4Address("192.168.10.210"))
+        self.assertEqual(located.mac, "aa:ba:36:4d:1a:6b")
+        self.assertEqual(located.hostname, "IvandeMacBook-Air.local")
+
+    def test_locate_devices_returns_multiple_mdns_matches(self) -> None:
+        with (
+            patch(
+                "hyping.discovery.resolver._candidate_hostnames_from_mdns_text",
+                return_value=[
+                    "IvandeMacBook-Air.local",
+                    "liuyilingdeMacBook-Air.local",
+                ],
+            ),
+            patch(
+                "hyping.discovery.resolver.resolve_ipv4_addresses",
+                side_effect=[
+                    [],
+                    [IPv4Address("192.168.10.210")],
+                    [IPv4Address("192.168.10.199")],
+                ],
+            ),
+            patch(
+                "hyping.discovery.resolver._read_arp_cache",
+                side_effect=[
+                    "aa:ba:36:4d:1a:6b",
+                    "ce:a0:4a:b2:89:fd",
+                ],
+            ),
+        ):
+            located = locate_devices(
+                hostname="MacBook-Air",
+                partial_hostname=True,
+            )
+
+        self.assertEqual(
+            located,
+            [
+                Device(
+                    ip=IPv4Address("192.168.10.210"),
+                    mac="aa:ba:36:4d:1a:6b",
+                    hostname="IvandeMacBook-Air.local",
+                ),
+                Device(
+                    ip=IPv4Address("192.168.10.199"),
+                    mac="ce:a0:4a:b2:89:fd",
+                    hostname="liuyilingdeMacBook-Air.local",
+                ),
+            ],
+        )
 
     def test_locate_device_resolves_hostname_then_arp_cache(self) -> None:
         with (
@@ -170,9 +306,46 @@ class ResolverTests(unittest.TestCase):
             with self.assertRaises(DeviceNotFoundError):
                 locate_device(hostname="missing.local")
 
+    def test_locate_device_ignores_arp_scan_permission_errors(self) -> None:
+        with (
+            patch(
+                "hyping.discovery.resolver.arp_scan",
+                side_effect=ARPScanError("permission denied"),
+            ),
+            patch(
+                "hyping.discovery.resolver.resolve_ipv4_addresses",
+                return_value=[IPv4Address("192.168.1.80")],
+            ),
+            patch(
+                "hyping.discovery.resolver._read_arp_cache",
+                return_value="aa:bb:cc:dd:ee:80",
+            ),
+        ):
+            located = locate_device(
+                hostname="printer.local",
+                network="192.168.1.0/24",
+            )
+
+        self.assertEqual(located.ip, IPv4Address("192.168.1.80"))
+        self.assertEqual(located.mac, "aa:bb:cc:dd:ee:80")
+
+    def test_locate_device_keeps_local_suffix_when_hostname_has_root_dot(self) -> None:
+        with patch(
+            "hyping.discovery.resolver.resolve_ipv4_addresses",
+            return_value=[],
+        ):
+            with self.assertRaisesRegex(
+                DeviceNotFoundError,
+                "haozdeMacBook-Air\\.local",
+            ) as context:
+                locate_device(hostname="haozdeMacBook-Air.local.")
+
+        self.assertNotIn("hostname='haozdeMacBook-Air.lo'", str(context.exception))
+
     def test_normalize_mac(self) -> None:
         self.assertEqual(normalize_mac("A:B:C:D:E:F"), "0a:0b:0c:0d:0e:0f")
         self.assertEqual(normalize_mac("AA-BB-CC-DD-EE-FF"), "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(normalize_mac("AABA364D1A6B"), "aa:ba:36:4d:1a:6b")
 
 
 if __name__ == "__main__":

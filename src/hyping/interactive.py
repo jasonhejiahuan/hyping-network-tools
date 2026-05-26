@@ -2,8 +2,10 @@ import json
 import os
 import shutil
 import sys
+from ipaddress import IPv4Address
 from pathlib import Path
 
+from hyping.discovery.arp import can_run_active_arp_scan
 from hyping.discovery.mdns import (
     DEFAULT_SERVICE_TYPES,
     find_mdns_services_by_hostname,
@@ -11,7 +13,13 @@ from hyping.discovery.mdns import (
     format_mdns_service,
     merge_mdns_services,
 )
-from hyping.discovery.resolver import DeviceNotFoundError, locate_device
+from hyping.discovery.network import (
+    detect_local_ipv4_network,
+    detect_local_network_info,
+)
+from hyping.discovery.resolver import DeviceNotFoundError, locate_devices
+from hyping.loadtest import LoadTestConfig, run_load_test
+from hyping.models.device import Device
 from hyping.storage import (
     DEFAULT_STORE_PATH,
     DeviceRecord,
@@ -130,6 +138,15 @@ def _record_from_located_device(device) -> DeviceRecord:
     }
 
 
+def _record_title(record: DeviceRecord) -> str:
+    return str(
+        record.get("hostname")
+        or record.get("ip")
+        or record.get("mac")
+        or record
+    )
+
+
 def _save_record(store_path: Path, record: DeviceRecord) -> None:
     records = load_device_records(store_path)
     upsert_device_record(records, record)
@@ -151,6 +168,122 @@ def _note_hosts_with_current(
     return note_hosts
 
 
+def _devices_from_records(records: list[DeviceRecord]) -> list[Device]:
+    devices: list[Device] = []
+
+    for record in records:
+        ip = record.get("ip")
+        mac = record.get("mac")
+        if not isinstance(ip, str) or not ip.strip():
+            continue
+        if not isinstance(mac, str) or not mac.strip():
+            continue
+
+        try:
+            address = IPv4Address(ip.strip())
+        except ValueError:
+            continue
+
+        hostname = record.get("hostname")
+        note = record.get("note")
+        devices.append(
+            Device(
+                ip=address,
+                mac=mac.strip(),
+                hostname=hostname.strip() if isinstance(hostname, str) else None,
+                note=note.strip() if isinstance(note, str) else None,
+            )
+        )
+
+    return devices
+
+
+def _known_devices_with_current(
+    records: list[DeviceRecord],
+    current: DeviceRecord | None,
+) -> list[Device]:
+    known_records = [*records]
+    if current is not None:
+        known_records.append(current)
+
+    return _devices_from_records(known_records)
+
+
+def _choose_record(records: list[DeviceRecord], prompt: str) -> DeviceRecord | None:
+    if not records:
+        print("没有可选择的设备。")
+        return None
+
+    _show_records(records)
+    raw_index = _ask(prompt)
+    try:
+        index = int(raw_index) - 1
+    except ValueError:
+        print("编号无效。")
+        return None
+
+    if index < 0 or index >= len(records):
+        print("编号不存在。")
+        return None
+
+    return records[index]
+
+
+def _located_devices_action_flow(
+    store_path: Path,
+    records: list[DeviceRecord],
+) -> DeviceRecord | None:
+    current: DeviceRecord | None = None
+
+    while True:
+        _title("搜索结果")
+        _show_records(records)
+        if current is not None:
+            print(_clip(_current_summary(current), _terminal_width()))
+
+        print(
+            "\n请选择操作：\n"
+            "  1. 选择一台作为当前设备\n"
+            "  2. 保存一台设备\n"
+            "  3. 保存全部设备\n"
+            "  4. 查看一台设备详情\n"
+            "  5. 返回"
+        )
+        choice = _ask("输入编号", "1")
+        _clear_screen()
+
+        if choice == "1":
+            selected = _choose_record(records, "输入要设为当前设备的编号")
+            if selected is not None:
+                current = selected
+                print(f"已设为当前设备：{_record_title(selected)}")
+            _pause()
+            _clear_screen()
+        elif choice == "2":
+            selected = _choose_record(records, "输入要保存的编号")
+            if selected is not None:
+                _save_record(store_path, selected)
+            _pause()
+            _clear_screen()
+        elif choice == "3":
+            for record in records:
+                _save_record(store_path, record)
+            _pause()
+            _clear_screen()
+        elif choice == "4":
+            selected = _choose_record(records, "输入要查看详情的编号")
+            if selected is not None:
+                print(json.dumps(selected, ensure_ascii=False, indent=2))
+            _pause()
+            _clear_screen()
+        elif choice == "5":
+            return current
+        else:
+            print("未知选项，请重新输入。")
+            _pause()
+            _clear_screen()
+
+
 def _locate_flow(
     store_path: Path,
     current: DeviceRecord | None = None,
@@ -161,33 +294,49 @@ def _locate_flow(
     default_note = current.get("note") if current else None
     hostname = _ask("hostname，可留空", default_hostname)
     note = _ask("note/备注，可留空", default_note)
-    network = _ask("ARP 扫描网段，可留空，例如 192.168.1.0/24")
+    network = _ask("ARP 扫描网段；留空自动检测，输入 none 跳过")
+    if not network:
+        network = detect_local_ipv4_network()
+        if network:
+            print(f"已自动检测本机网段：{network}")
+        else:
+            print("未能自动检测本机网段，将跳过 ARP 扫描。")
+    elif network.casefold() in {"none", "no", "skip", "跳过"}:
+        network = ""
+    if network and not can_run_active_arp_scan():
+        print("当前没有 root 权限，已跳过主动 ARP 扫描。")
+        print("仍会尝试 DNS/mDNS 和系统 ARP 缓存；如需全网 ARP 扫描请用 sudo 运行。")
+        network = ""
+    partial_hostname = _yes("是否允许 hostname 部分匹配", default=True)
     partial_note = _yes("是否允许 note 部分匹配", default=False)
     timeout = float(_ask("超时时间秒", "1.0"))
 
     try:
-        device = locate_device(
+        devices = locate_devices(
             hostname=hostname or None,
             note=note or None,
             network=network or None,
+            devices=_known_devices_with_current(records, current),
             note_hosts=_note_hosts_with_current(records, current),
             timeout=timeout,
+            partial_hostname=partial_hostname,
             partial_note=partial_note,
         )
     except (DeviceNotFoundError, ValueError) as exc:
         print(f"查询失败：{exc}")
         return current
 
-    record = _merge_current(current, _record_from_located_device(device))
-    print(json.dumps(record, ensure_ascii=False, indent=2))
-    if _yes("是否保存这个设备"):
-        if not record.get("note"):
-            saved_note = _ask("给它添加 note/备注，可留空")
-            if saved_note:
-                record["note"] = saved_note
-        _save_record(store_path, record)
+    if not devices:
+        print("没有找到匹配设备。")
+        return current
 
-    return record
+    found_records = [_record_from_located_device(device) for device in devices]
+    print(f"找到 {len(found_records)} 台设备：")
+    selected = _located_devices_action_flow(store_path, found_records)
+    if selected is not None:
+        return selected
+
+    return current
 
 
 def _mdns_flow(
@@ -294,18 +443,151 @@ def _select_saved_flow(store_path: Path) -> DeviceRecord | None:
     return record
 
 
+def _saved_devices_flow(
+    store_path: Path,
+    current: DeviceRecord | None = None,
+) -> DeviceRecord | None:
+    """Manage saved devices from a secondary menu."""
+
+    while True:
+        _clear_screen()
+        _title("已保存设备管理")
+        print(_clip(_current_summary(current), _terminal_width()))
+        print(
+            "\n请选择操作：\n"
+            "  1. 查看已保存设备\n"
+            "  2. 选择已保存设备为当前设备\n"
+            "  3. 删除已保存设备\n"
+            "  4. 返回主菜单"
+        )
+        choice = _ask("输入编号", "1")
+        _clear_screen()
+
+        if choice == "1":
+            _title("查看已保存设备")
+            _show_records(load_device_records(store_path))
+            _pause()
+        elif choice == "2":
+            selected = _select_saved_flow(store_path)
+            if selected is not None:
+                current = selected
+            _pause()
+        elif choice == "3":
+            _delete_flow(store_path)
+            _pause()
+        elif choice == "4":
+            return current
+        else:
+            print("未知选项，请重新输入。")
+            _pause()
+
+
+def _load_test_flow(current: DeviceRecord | None = None) -> None:
+    _title("并发 ping / TCP 负载测试")
+    default_target = None
+    if current is not None:
+        default_target = current.get("ip") or current.get("hostname")
+
+    target = _ask("目标 IP 或 hostname", default_target)
+    if not target:
+        print("目标不能为空。")
+        return
+
+    protocol = _ask("协议 icmp/tcp", "icmp").casefold()
+    if protocol not in {"icmp", "tcp"}:
+        print("协议只能是 icmp 或 tcp。")
+        return
+
+    port: int | None = None
+    if protocol == "tcp":
+        port_text = _ask("TCP 端口", "80")
+        try:
+            port = int(port_text)
+        except ValueError:
+            print("端口无效。")
+            return
+
+    try:
+        concurrency = int(_ask("并发线程数", "32"))
+        duration_text = _ask("持续时间秒；输入 0 则仅按总数量", "10")
+        count_text = _ask("总请求/包数；留空则按持续时间")
+        timeout = float(_ask("单次超时时间秒", "1.0"))
+        ramp_up = float(_ask("渐进启动秒数；0 表示同时启动", "0.75"))
+        jitter = float(_ask("线程错峰抖动秒数", "0.002"))
+    except ValueError:
+        print("参数格式无效。")
+        return
+
+    duration = None if duration_text in {"", "0"} else float(duration_text)
+    count = int(count_text) if count_text else None
+    if duration is None and count is None:
+        duration = 10.0
+
+    try:
+        run_load_test(
+            LoadTestConfig(
+                target=target,
+                protocol=protocol,  # type: ignore[arg-type]
+                concurrency=concurrency,
+                duration=duration,
+                count=count,
+                timeout=timeout,
+                tcp_port=port,
+                ramp_up=ramp_up,
+                per_worker_jitter=jitter,
+            )
+        )
+    except ValueError as exc:
+        print(f"参数错误：{exc}")
+
+
+def _is_elevated() -> bool:
+    if hasattr(os, "geteuid"):
+        return os.geteuid() == 0
+    try:
+        return os.getuid() == 0
+    except AttributeError:
+        return False
+
+
+def _format_network_status() -> str:
+    info = detect_local_network_info()
+    parts: list[str] = []
+
+    if info.hardware_port:
+        parts.append(info.hardware_port)
+    elif info.interface:
+        parts.append(info.interface)
+    else:
+        parts.append("未知网络")
+
+    is_wifi = bool(info.hardware_port and "wi-fi" in info.hardware_port.casefold())
+    if info.ssid:
+        parts.append(f"SSID: {info.ssid}")
+    elif is_wifi:
+        parts.append("SSID: 未获取")
+    if info.interface and info.hardware_port:
+        parts.append(f"接口: {info.interface}")
+    if info.ipv4_network:
+        parts.append(f"网段: {info.ipv4_network}")
+
+    return "当前网络：" + " | ".join(parts)
+
+
 def _print_menu(store_path: Path, current: DeviceRecord | None) -> None:
     _title("Hyping 交互式网络设备工具")
     print(f"设备保存文件：{store_path}")
+    if _is_elevated():
+        print("运行权限：提升权限/root")
+    print(_format_network_status())
     print(_clip(_current_summary(current), _terminal_width()))
     print(
         "\n请选择操作：\n"
         "  1. 通过 hostname/note 查询 IP 和 MAC\n"
         "  2. 查询 mDNS/Bonjour 详细信息\n"
-        "  3. 查看已保存设备\n"
-        "  4. 删除已保存设备\n"
-        "  5. 选择已保存设备为当前设备\n"
-        "  6. 退出"
+        "  3. 管理已保存设备\n"
+        "  4. 并发 ping / TCP 负载测试\n"
+        "  5. 退出"
     )
 
 
@@ -327,18 +609,11 @@ def run_interactive(store_path: Path = DEFAULT_STORE_PATH) -> int:
             current = _mdns_flow(store_path, current)
             _pause()
         elif choice == "3":
-            _title("查看已保存设备")
-            _show_records(load_device_records(store_path))
-            _pause()
+            current = _saved_devices_flow(store_path, current)
         elif choice == "4":
-            _delete_flow(store_path)
+            _load_test_flow(current)
             _pause()
         elif choice == "5":
-            selected = _select_saved_flow(store_path)
-            if selected is not None:
-                current = selected
-            _pause()
-        elif choice == "6":
             return 0
         else:
             print("未知选项，请重新输入。")

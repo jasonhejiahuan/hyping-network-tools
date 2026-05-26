@@ -3,6 +3,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from hyping.discovery.arp import can_run_active_arp_scan
 from hyping.discovery.mdns import (
     DEFAULT_SERVICE_TYPES,
     find_mdns_services_by_hostname,
@@ -11,8 +12,10 @@ from hyping.discovery.mdns import (
     merge_mdns_services,
     resolve_mdns_service,
 )
+from hyping.discovery.network import detect_local_ipv4_network
 from hyping.discovery.resolver import DeviceNotFoundError, locate_device
 from hyping.interactive import run_interactive
+from hyping.loadtest import LoadTestConfig, run_load_test
 from hyping.storage import DEFAULT_STORE_PATH
 
 
@@ -58,13 +61,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     locate.add_argument(
         "--network",
-        help="optional CIDR to ARP scan before DNS lookup, e.g. 192.168.1.0/24",
+        help=(
+            "optional CIDR to ARP scan before DNS lookup, e.g. 192.168.1.0/24; "
+            "use 'auto' to detect the local subnet"
+        ),
     )
     locate.add_argument(
         "--timeout",
         type=float,
         default=1.0,
         help="ARP scan/ping timeout in seconds",
+    )
+    locate.add_argument(
+        "--partial-hostname",
+        action="store_true",
+        help="allow substring hostname matching for known/scanned devices",
     )
     locate.add_argument(
         "--partial-note",
@@ -132,6 +143,70 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"device store JSON path; defaults to {DEFAULT_STORE_PATH}",
     )
 
+    load = subparsers.add_parser(
+        "load",
+        aliases=["ping-load"],
+        help="run a threaded ICMP/TCP load test with live statistics",
+    )
+    load.add_argument("target", help="target IP address or hostname")
+    load.add_argument(
+        "--protocol",
+        choices=["icmp", "tcp"],
+        default="icmp",
+        help="probe protocol; defaults to icmp",
+    )
+    load.add_argument(
+        "--port",
+        type=int,
+        help="TCP port; required when --protocol tcp",
+    )
+    load.add_argument(
+        "--concurrency",
+        type=int,
+        default=32,
+        help="number of worker threads",
+    )
+    load.add_argument(
+        "--duration",
+        type=float,
+        default=10.0,
+        help="test duration in seconds; use 0 with --count for count-only mode",
+    )
+    load.add_argument(
+        "--count",
+        type=int,
+        help="total probe count across all workers",
+    )
+    load.add_argument(
+        "--timeout",
+        type=float,
+        default=1.0,
+        help="per-probe timeout in seconds",
+    )
+    load.add_argument(
+        "--refresh",
+        type=float,
+        default=0.25,
+        help="live UI refresh interval in seconds",
+    )
+    load.add_argument(
+        "--ramp-up",
+        type=float,
+        default=0.75,
+        help="seconds used to gradually start worker threads; 0 starts at once",
+    )
+    load.add_argument(
+        "--jitter",
+        type=float,
+        default=0.002,
+        help="small per-worker loop jitter in seconds to avoid synchronized bursts",
+    )
+    load.add_argument(
+        "--no-live",
+        action="store_true",
+        help="disable live terminal UI and print only the final JSON summary",
+    )
+
     return parser
 
 
@@ -141,6 +216,30 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command in {"ui", "interactive"}:
         return run_interactive(args.store)
+
+    if args.command in {"load", "ping-load"}:
+        duration = None if args.duration == 0 else args.duration
+        try:
+            summary = run_load_test(
+                LoadTestConfig(
+                    target=args.target,
+                    protocol=args.protocol,
+                    concurrency=args.concurrency,
+                    duration=duration,
+                    count=args.count,
+                    timeout=args.timeout,
+                    tcp_port=args.port,
+                    refresh_interval=args.refresh,
+                    ramp_up=args.ramp_up,
+                    per_worker_jitter=args.jitter,
+                ),
+                live=not args.no_live,
+            )
+        except ValueError as exc:
+            parser.exit(2, f"{exc}\n")
+        if args.no_live:
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "mdns-info":
         try:
@@ -185,12 +284,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         note_hosts = _parse_note_hosts(args.note_host)
+        network = args.network
+        if isinstance(network, str) and network.casefold() == "auto":
+            network = detect_local_ipv4_network()
+            if network is None:
+                parser.exit(1, "could not auto-detect local IPv4 network\n")
+        if network and not can_run_active_arp_scan():
+            print(
+                "warning: active ARP scan requires root on this system; "
+                "falling back to DNS/mDNS and ARP cache"
+            )
+            network = None
+
         device = locate_device(
             hostname=args.hostname,
             note=args.note,
-            network=args.network,
+            network=network,
             note_hosts=note_hosts,
             timeout=args.timeout,
+            partial_hostname=args.partial_hostname,
             partial_note=args.partial_note,
             prime_arp_cache=not args.no_prime_arp_cache,
         )

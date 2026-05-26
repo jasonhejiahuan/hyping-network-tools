@@ -16,6 +16,7 @@ DEFAULT_SERVICE_TYPES = (
     "_pdl-datastream._tcp",
     "_airplay._tcp",
     "_raop._tcp",
+    "_companion-link._tcp",
     "_device-info._tcp",
     "_ssh._tcp",
 )
@@ -75,7 +76,6 @@ def _run_dns_sd(args: list[str], *, timeout: float) -> str:
         ["dns-sd", *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
     )
     try:
         stdout, _ = process.communicate(timeout=timeout)
@@ -86,6 +86,9 @@ def _run_dns_sd(args: list[str], *, timeout: float) -> str:
         except subprocess.TimeoutExpired:
             process.kill()
             stdout, _ = process.communicate()
+
+    if isinstance(stdout, bytes):
+        return stdout.decode("utf-8", errors="replace")
 
     return stdout
 
@@ -257,6 +260,89 @@ def find_mdns_services_by_hostname(
         matches,
         key=lambda service: (
             order.get(service.service_type, len(order)),
+            service.instance,
+        ),
+    )
+
+
+def _service_matches_text(service: MDNSService, text: str) -> bool:
+    query = text.strip().casefold()
+    if not query:
+        return False
+
+    haystacks = [
+        service.instance,
+        service.hostname,
+        *service.txt.values(),
+    ]
+    return any(query in haystack.casefold() for haystack in haystacks)
+
+
+def find_mdns_services_by_text(
+    text: str,
+    *,
+    service_types: Iterable[str] = DEFAULT_SERVICE_TYPES,
+    domain: str = "local",
+    timeout: float = 2.0,
+    first: bool = False,
+) -> list[MDNSService]:
+    """Find Bonjour services whose instance, hostname or TXT values contain text."""
+
+    if not text.strip():
+        msg = "search text must not be empty"
+        raise ValueError(msg)
+
+    service_type_list = list(dict.fromkeys(service_types))
+    matches: list[MDNSService] = []
+
+    with ThreadPoolExecutor(max_workers=max(1, len(service_type_list))) as executor:
+        browse_futures = {
+            executor.submit(
+                browse_mdns_services,
+                service_type,
+                domain=domain,
+                timeout=timeout,
+            ): service_type
+            for service_type in service_type_list
+        }
+
+        resolve_jobs: list[tuple[str, str]] = []
+        for future in as_completed(browse_futures):
+            service_type = browse_futures[future]
+            for instance in future.result():
+                resolve_jobs.append((instance, service_type))
+
+    if not resolve_jobs:
+        return []
+
+    with ThreadPoolExecutor(max_workers=max(1, len(resolve_jobs))) as executor:
+        resolve_futures = [
+            executor.submit(
+                resolve_mdns_service,
+                instance,
+                service_type,
+                domain=domain,
+                timeout=timeout,
+            )
+            for instance, service_type in resolve_jobs
+        ]
+
+        for future in as_completed(resolve_futures):
+            service = future.result()
+            if _service_matches_text(service, text):
+                matches.append(service)
+                if first:
+                    return matches
+
+    order = {
+        service_type: index
+        for index, service_type in enumerate(service_type_list)
+    }
+    return sorted(
+        matches,
+        key=lambda service: (
+            order.get(service.service_type, len(order)),
+            service.hostname,
             service.instance,
         ),
     )
