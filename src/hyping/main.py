@@ -3,7 +3,13 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
-from hyping.discovery.arp import can_run_active_arp_scan
+from hyping.discovery.arp import can_run_active_arp_scan, list_network_devices
+from hyping.discovery.bettercap import (
+    BettercapAPIError,
+    BettercapClient,
+    list_bettercap_hosts,
+    record_from_bettercap_host,
+)
 from hyping.discovery.mdns import (
     DEFAULT_SERVICE_TYPES,
     find_mdns_services_by_hostname,
@@ -37,6 +43,42 @@ def _parse_note_hosts(values: Sequence[str]) -> dict[str, str]:
         note_hosts[note] = hostname
 
     return note_hosts
+
+
+def _device_to_record(device) -> dict[str, str | None]:
+    return {
+        "ip": str(device.ip),
+        "mac": device.mac,
+        "hostname": device.hostname,
+        "note": device.note,
+    }
+
+
+def _scan_item_to_record(item) -> dict[str, object]:
+    if hasattr(item, "display_name"):
+        return record_from_bettercap_host(item)
+
+    return _device_to_record(item)
+
+
+def _print_scan_header() -> None:
+    print(
+        " #   ip               mac                "
+        "name                         vendor"
+    )
+    print("─" * 96)
+
+
+def _print_scan_item(index: int, item) -> None:
+    record = _scan_item_to_record(item)
+    print(
+        f"{index:>3}. "
+        f"{str(record.get('ip') or '-'):<15}  "
+        f"{str(record.get('mac') or '-'):<17}  "
+        f"{str(record.get('hostname') or '-'):<28}  "
+        f"{str(record.get('vendor') or '-')}",
+        flush=True,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -86,6 +128,89 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-prime-arp-cache",
         action="store_true",
         help="do not ping the resolved IP before reading the local ARP cache",
+    )
+
+    scan = subparsers.add_parser(
+        "scan",
+        aliases=["list"],
+        help="list devices on the current or specified local subnet",
+    )
+    scan.add_argument(
+        "--network",
+        default="auto",
+        help="CIDR for builtin scan, e.g. 192.168.1.0/24; defaults to auto",
+    )
+    scan.add_argument(
+        "--scanner",
+        choices=["bettercap", "builtin"],
+        default="bettercap",
+        help="scanner backend; defaults to Bettercap REST API",
+    )
+    scan.add_argument(
+        "--bettercap-url",
+        default="http://127.0.0.1:8081",
+        help="Bettercap REST API base URL",
+    )
+    scan.add_argument(
+        "--bettercap-user",
+        default="user",
+        help="Bettercap REST API username",
+    )
+    scan.add_argument(
+        "--bettercap-pass",
+        default="pass",
+        help="Bettercap REST API password",
+    )
+    scan.add_argument(
+        "--bettercap-wait",
+        type=float,
+        default=5.0,
+        help="seconds to poll Bettercap for newly discovered hosts",
+    )
+    scan.add_argument(
+        "--bettercap-poll",
+        type=float,
+        default=0.5,
+        help="Bettercap polling interval in seconds",
+    )
+    scan.add_argument(
+        "--no-start-bettercap",
+        action="store_true",
+        help="do not send 'net.recon on' and 'net.probe on' to Bettercap",
+    )
+    scan.add_argument(
+        "--timeout",
+        type=float,
+        default=0.5,
+        help="seconds to wait for each ARP batch; 0.3-1.0 is usually enough",
+    )
+    scan.add_argument(
+        "--passes",
+        type=int,
+        default=3,
+        help="number of scan passes; repeating finds more Wi-Fi clients",
+    )
+    scan.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="number of IPs to probe per batch",
+    )
+    scan.add_argument(
+        "--interval",
+        type=float,
+        default=0.002,
+        help="small delay between ARP packets in seconds",
+    )
+    scan.add_argument(
+        "--no-resolve-hostnames",
+        action="store_true",
+        help="do not try reverse DNS for discovered devices",
+    )
+    scan.add_argument(
+        "--json",
+        action="store_true",
+        help="print only the final JSON list instead of progressive rows",
     )
 
     mdns_info = subparsers.add_parser(
@@ -260,6 +385,78 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
 
+    if args.command in {"scan", "list"}:
+        discovered_count = 0
+
+        def on_item(item) -> None:
+            nonlocal discovered_count
+            discovered_count += 1
+            _print_scan_item(discovered_count, item)
+
+        if not args.json:
+            if args.scanner == "bettercap":
+                print(f"扫描来源：Bettercap API {args.bettercap_url}")
+            else:
+                print("扫描来源：内置 ARP 扫描")
+            _print_scan_header()
+
+        try:
+            if args.scanner == "bettercap":
+                client = BettercapClient(
+                    args.bettercap_url,
+                    args.bettercap_user,
+                    args.bettercap_pass,
+                    timeout=args.timeout,
+                )
+                items = list_bettercap_hosts(
+                    client,
+                    wait=args.bettercap_wait,
+                    poll_interval=args.bettercap_poll,
+                    start_discovery=not args.no_start_bettercap,
+                    on_host=None if args.json else on_item,
+                )
+            else:
+                network = args.network
+                if isinstance(network, str) and network.casefold() == "auto":
+                    network = detect_local_ipv4_network()
+                    if network is None:
+                        parser.exit(1, "could not auto-detect local IPv4 network\n")
+                if not can_run_active_arp_scan():
+                    parser.exit(
+                        1,
+                        "active ARP scan requires root/admin privileges; "
+                        "try running with sudo\n",
+                    )
+
+                items = list_network_devices(
+                    network,
+                    timeout=args.timeout,
+                    passes=args.passes,
+                    batch_size=args.batch_size,
+                    interval=args.interval,
+                    resolve_hostnames=not args.no_resolve_hostnames,
+                    on_device=None if args.json else on_item,
+                )
+        except BettercapAPIError as exc:
+            parser.exit(1, f"{exc}\n")
+
+        if args.json:
+            print(
+                json.dumps(
+                    [_scan_item_to_record(item) for item in items],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            print(f"\n扫描完成，发现 {len(items)} 台设备。")
+            if args.scanner == "builtin" and not args.no_resolve_hostnames:
+                print("\n最终列表：")
+                _print_scan_header()
+                for index, item in enumerate(items, start=1):
+                    _print_scan_item(index, item)
+        return 0
+
     if args.command == "mdns-info":
         try:
             if args.instance:
@@ -333,10 +530,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         json.dumps(
             {
-                "ip": str(device.ip),
-                "mac": device.mac,
-                "hostname": device.hostname,
-                "note": device.note,
+                **_device_to_record(device),
             },
             ensure_ascii=False,
         )

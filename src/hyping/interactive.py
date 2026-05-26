@@ -5,7 +5,13 @@ import sys
 from ipaddress import IPv4Address
 from pathlib import Path
 
-from hyping.discovery.arp import can_run_active_arp_scan
+from hyping.discovery.arp import can_run_active_arp_scan, list_network_devices
+from hyping.discovery.bettercap import (
+    BettercapAPIError,
+    BettercapClient,
+    list_bettercap_hosts,
+    record_from_bettercap_host,
+)
 from hyping.discovery.mdns import (
     DEFAULT_SERVICE_TYPES,
     find_mdns_services_by_hostname,
@@ -108,6 +114,8 @@ def _print_record(index: int, record: DeviceRecord) -> None:
     ip = record.get("ip") or "-"
     mac = record.get("mac") or "-"
     note = record.get("note") or "-"
+    if note == "-":
+        note = record.get("vendor") or "-"
     print(
         f"{index:>2}. "
         f"{_clip(hostname, hostname_width):<{hostname_width}}  "
@@ -136,6 +144,13 @@ def _record_from_located_device(device) -> DeviceRecord:
         "hostname": device.hostname,
         "note": device.note,
     }
+
+
+def _record_from_scan_item(item) -> DeviceRecord:
+    if hasattr(item, "display_name"):
+        return record_from_bettercap_host(item)
+
+    return _record_from_located_device(item)
 
 
 def _record_title(record: DeviceRecord) -> str:
@@ -282,6 +297,98 @@ def _located_devices_action_flow(
             print("未知选项，请重新输入。")
             _pause()
             _clear_screen()
+
+
+def _scan_network_flow(store_path: Path) -> DeviceRecord | None:
+    _title("列出当前网段设备")
+    scanner = _ask("扫描来源 bettercap/builtin", "bettercap").casefold()
+    if scanner not in {"bettercap", "builtin"}:
+        print("扫描来源只能是 bettercap 或 builtin。")
+        return None
+
+    try:
+        if scanner == "bettercap":
+            api_url = _ask("Bettercap API 地址", "http://127.0.0.1:8081")
+            api_user = _ask("Bettercap 用户名", "user")
+            api_pass = _ask("Bettercap 密码", "pass")
+            api_timeout = float(_ask("API 超时时间秒", "3.0"))
+            wait = float(_ask("持续读取 Bettercap 秒数", "5.0"))
+            poll_interval = float(_ask("刷新间隔秒", "0.5"))
+            start_discovery = _yes("是否自动启动 net.recon/net.probe", default=True)
+        else:
+            network = _ask("扫描网段；留空自动检测", "")
+            if not network:
+                network = detect_local_ipv4_network()
+                if network:
+                    print(f"已自动检测本机网段：{network}")
+                else:
+                    print("未能自动检测本机网段。")
+                    return None
+
+            if not can_run_active_arp_scan():
+                print("当前没有 root 权限，无法主动扫描整个网段。")
+                print("建议使用 Bettercap；或用 sudo 启动内置扫描。")
+                return None
+
+            timeout = float(_ask("每批等待秒；0.3-1.0 通常够用", "0.5"))
+            passes = int(_ask("扫描轮数；轮数越多发现越全", "3"))
+            batch_size = int(_ask("每批扫描 IP 数", "64"))
+            interval = float(_ask("ARP 包间隔秒", "0.002"))
+            resolve_hostnames = _yes("是否尝试解析 hostname", default=True)
+    except ValueError:
+        print("参数格式无效。")
+        return None
+
+    live_records: list[DeviceRecord] = []
+
+    def on_device(device) -> None:
+        record = _record_from_scan_item(device)
+        live_records.append(record)
+        _print_record(len(live_records), record)
+
+    print("\n实时发现：")
+    print(" #  hostname                         ip              mac               note")
+    print("─" * min(_terminal_width(), 100))
+
+    try:
+        if scanner == "bettercap":
+            client = BettercapClient(
+                api_url,
+                api_user,
+                api_pass,
+                timeout=api_timeout,
+            )
+            devices = list_bettercap_hosts(
+                client,
+                wait=wait,
+                poll_interval=poll_interval,
+                start_discovery=start_discovery,
+                on_host=on_device,
+            )
+        else:
+            devices = list_network_devices(
+                network,
+                timeout=timeout,
+                passes=passes,
+                batch_size=batch_size,
+                interval=interval,
+                resolve_hostnames=resolve_hostnames,
+                on_device=on_device,
+            )
+    except BettercapAPIError as exc:
+        print(f"扫描失败：{exc}")
+        return None
+    except Exception as exc:
+        print(f"扫描失败：{exc}")
+        return None
+
+    if not devices:
+        print("没有发现设备。")
+        return None
+
+    records = [_record_from_scan_item(device) for device in devices]
+    print(f"发现 {len(records)} 台设备：")
+    return _located_devices_action_flow(store_path, records)
 
 
 def _locate_flow(
@@ -590,10 +697,11 @@ def _print_menu(store_path: Path, current: DeviceRecord | None) -> None:
     print(
         "\n请选择操作：\n"
         "  1. 通过 hostname/note 查询 IP 和 MAC\n"
-        "  2. 查询 mDNS/Bonjour 详细信息\n"
-        "  3. 管理已保存设备\n"
-        "  4. 并发 ping / TCP 负载测试\n"
-        "  5. 退出"
+        "  2. 列出当前网段设备\n"
+        "  3. 查询 mDNS/Bonjour 详细信息\n"
+        "  4. 管理已保存设备\n"
+        "  5. 并发 ping / TCP 负载测试\n"
+        "  6. 退出"
     )
 
 
@@ -612,14 +720,19 @@ def run_interactive(store_path: Path = DEFAULT_STORE_PATH) -> int:
             current = _locate_flow(store_path, current)
             _pause()
         elif choice == "2":
-            current = _mdns_flow(store_path, current)
+            selected = _scan_network_flow(store_path)
+            if selected is not None:
+                current = selected
             _pause()
         elif choice == "3":
-            current = _saved_devices_flow(store_path, current)
+            current = _mdns_flow(store_path, current)
+            _pause()
         elif choice == "4":
+            current = _saved_devices_flow(store_path, current)
+        elif choice == "5":
             _load_test_flow(current)
             _pause()
-        elif choice == "5":
+        elif choice == "6":
             return 0
         else:
             print("未知选项，请重新输入。")
