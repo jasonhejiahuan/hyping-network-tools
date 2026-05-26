@@ -512,6 +512,10 @@ def _load_test_flow(current: DeviceRecord | None = None) -> None:
         duration_text = _ask("持续时间秒；输入 0 则仅按总数量", "10")
         count_text = _ask("总请求/包数；留空则按持续时间")
         timeout = float(_ask("单次超时时间秒", "1.0"))
+        payload_size = int(_ask("每次发送负载字节数；0 表示默认", "0"))
+        tcp_keep_open = False
+        if protocol == "tcp":
+            tcp_keep_open = _yes("是否保持 TCP 连接并持续发送", default=False)
         ramp_up = float(_ask("渐进启动秒数；0 表示同时启动", "0.75"))
         jitter = float(_ask("线程错峰抖动秒数", "0.002"))
     except ValueError:
@@ -535,6 +539,8 @@ def _load_test_flow(current: DeviceRecord | None = None) -> None:
                 tcp_port=port,
                 ramp_up=ramp_up,
                 per_worker_jitter=jitter,
+                payload_size=payload_size,
+                tcp_keep_open=tcp_keep_open,
             )
         )
     except ValueError as exc:

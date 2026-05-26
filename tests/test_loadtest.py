@@ -10,7 +10,7 @@ class LoadTestTests(unittest.TestCase):
     def test_count_limited_load_test_uses_concurrency(self) -> None:
         def fake_probe(config):
             time.sleep(0.001)
-            return True, 1.0
+            return True, 1.0, config.payload_size
 
         with patch("hyping.loadtest._probe", fake_probe):
             summary = run_load_test(
@@ -45,7 +45,7 @@ class LoadTestTests(unittest.TestCase):
 
     def test_latency_is_recorded_for_failed_probes(self) -> None:
         def fake_probe(config):
-            return False, 12.5
+            return False, 12.5, 0
 
         with patch("hyping.loadtest._probe", fake_probe):
             summary = run_load_test(
@@ -74,11 +74,14 @@ class LoadTestTests(unittest.TestCase):
             stderr="",
         )
 
-        with patch("hyping.loadtest.subprocess.run", return_value=completed):
-            success, latency_ms = _icmp_probe("127.0.0.1", 1.0)
+        with patch("hyping.loadtest.subprocess.run", return_value=completed) as run:
+            success, latency_ms, bytes_sent = _icmp_probe("127.0.0.1", 1.0, 128)
 
         self.assertTrue(success)
         self.assertEqual(latency_ms, 0.118)
+        self.assertEqual(bytes_sent, 128)
+        self.assertIn("-s", run.call_args.args[0])
+        self.assertIn("128", run.call_args.args[0])
 
     def test_ramp_up_and_jitter_must_not_be_negative(self) -> None:
         with self.assertRaises(ValueError):
@@ -88,6 +91,40 @@ class LoadTestTests(unittest.TestCase):
                     duration=None,
                     count=1,
                     ramp_up=-1,
+                ),
+                live=False,
+            )
+
+    def test_payload_size_counts_sent_bytes(self) -> None:
+        def fake_probe(config):
+            return True, 1.0, config.payload_size
+
+        with patch("hyping.loadtest._probe", fake_probe):
+            summary = run_load_test(
+                LoadTestConfig(
+                    target="127.0.0.1",
+                    concurrency=2,
+                    duration=None,
+                    count=3,
+                    timeout=0.1,
+                    ramp_up=0,
+                    per_worker_jitter=0,
+                    payload_size=512,
+                ),
+                live=False,
+            )
+
+        self.assertEqual(summary["bytes_sent"], 1536)
+        self.assertGreater(summary["bandwidth_Bps"], 0)
+
+    def test_tcp_keep_open_requires_tcp(self) -> None:
+        with self.assertRaises(ValueError):
+            run_load_test(
+                LoadTestConfig(
+                    target="127.0.0.1",
+                    duration=None,
+                    count=1,
+                    tcp_keep_open=True,
                 ),
                 live=False,
             )

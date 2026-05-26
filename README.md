@@ -1,11 +1,191 @@
 # Hyping
 
-A small terminal tool for finding devices on your local network.
+[中文](#中文说明) | [English](#english)
+
+## 中文说明
+
+Hyping 是一个简单的终端网络工具，用来快速找到局域网里的设备。
+
+当你只记得设备名字的一部分、备注，或者只想知道它的 IP 和 MAC 地址时，可以用它快速搜索。
+
+### 它能做什么
+
+- 通过 hostname 查找设备，例如 `printer.local`
+- 通过部分名字查找设备，例如 `Ivan` 或 `MacBook-Air`
+- 一次显示所有匹配设备，而不是只显示一个
+- 保存常用设备和备注
+- 查看 Bonjour / mDNS 信息
+- 做简单的 ping 或 TCP 负载测试
+- 自定义测试负载大小
+- 在交互界面显示当前网络和网段
+
+### 快速开始
+
+这个项目目前需要 Python 3.14 或更新版本。
+
+在项目目录运行：
+
+```bash
+source .venv-ft/bin/activate
+PYTHONPATH=src python -m hyping.main ui
+```
+
+如果已经安装成命令，也可以直接运行：
+
+```bash
+hyping ui
+```
+
+### 推荐使用方式
+
+启动交互界面：
+
+```bash
+PYTHONPATH=src python -m hyping.main ui
+```
+
+你会看到这样的菜单：
+
+```text
+1. 通过 hostname/note 查询 IP 和 MAC
+2. 查询 mDNS/Bonjour 详细信息
+3. 管理已保存设备
+4. 并发 ping / TCP 负载测试
+5. 退出
+```
+
+选择 `1` 可以搜索设备。
+
+可以输入完整名字：
+
+```text
+IvandeMacBook-Air.local
+```
+
+也可以只输入一部分：
+
+```text
+Ivan
+```
+
+如果找到多台设备，Hyping 会显示列表，让你继续选择：
+
+```text
+1. 选择一台作为当前设备
+2. 保存一台设备
+3. 保存全部设备
+4. 查看一台设备详情
+5. 返回
+```
+
+### 常用命令
+
+通过 hostname 查找设备：
+
+```bash
+PYTHONPATH=src python -m hyping.main locate --hostname IvandeMacBook-Air.local
+```
+
+通过部分 hostname 查找设备：
+
+```bash
+PYTHONPATH=src python -m hyping.main locate --hostname Ivan --partial-hostname
+```
+
+打开交互界面：
+
+```bash
+PYTHONPATH=src python -m hyping.main ui
+```
+
+查看 mDNS / Bonjour 信息：
+
+```bash
+PYTHONPATH=src python -m hyping.main mdns-info --hostname IvandeMacBook-Air.local --merge
+```
+
+运行简单负载测试：
+
+```bash
+PYTHONPATH=src python -m hyping.main load 192.168.10.210 --duration 10
+```
+
+使用 TCP 测试：
+
+```bash
+PYTHONPATH=src python -m hyping.main load 192.168.10.210 --protocol tcp --port 80
+```
+
+自定义每次发送的数据大小：
+
+```bash
+PYTHONPATH=src python -m hyping.main load 192.168.10.210 --payload-size 1200
+```
+
+如果是你有权限测试的服务器，可以让 TCP 保持连接并持续发送数据：
+
+```bash
+PYTHONPATH=src python -m hyping.main load 192.168.10.210 --protocol tcp --port 80 --payload-size 65536 --tcp-keep-open
+```
+
+### 权限说明
+
+有些网络操作需要更高权限才更准确。
+
+在 macOS 上，主动 ARP 扫描通常需要 `sudo`：
+
+```bash
+sudo PYTHONPATH=src python -m hyping.main ui
+```
+
+不使用 `sudo` 也可以运行。Hyping 仍会尝试 DNS、mDNS 和系统 ARP 缓存。
+
+如果程序真的在提升权限下运行，主界面会显示对应提示；否则不会显示。
+
+### 关于 Wi-Fi 名称
+
+Hyping 会尝试显示当前网络、接口和网段。
+
+例如：
+
+```text
+当前网络：Wi-Fi | SSID: 未获取 | 接口: en0 | 网段: 192.168.8.0/22
+```
+
+在较新的 macOS 上，Wi-Fi 名称可能会被系统隐藏，所以看到 `SSID: 未获取` 是正常的。网段仍然可以用来查找设备。
+
+### 保存的设备在哪里
+
+默认保存到：
+
+```text
+~/.hyping/devices.json
+```
+
+在交互界面里选择 `管理已保存设备`，可以查看、选择或删除保存的设备。
+
+### 开发检查
+
+```bash
+.venv-ft/bin/ruff check src tests
+PYTHONPATH=src .venv-ft/bin/python -m unittest discover -s tests -q
+.venv-ft/bin/python -m compileall -q src
+```
+
+### 说明
+
+Hyping 不是复杂的大型网络管理平台。
+
+它的目标很简单：快速找到附近设备，并且尽量保持界面容易理解。
+
+## English
+
+Hyping is a small terminal tool for finding devices on your local network.
 
 Use it when you know a device is nearby, but you only remember part of its name,
 its note, or you just want to see its IP and MAC address quickly.
 
-## What it can do
+### What it can do
 
 - Find a device by hostname, for example `printer.local`.
 - Find devices with partial names, for example `Ivan` or `MacBook-Air`.
@@ -13,9 +193,10 @@ its note, or you just want to see its IP and MAC address quickly.
 - Save devices you care about with simple notes.
 - Read Bonjour / mDNS details from devices that advertise them.
 - Run a simple ping or TCP load test.
+- Customize the payload size for load tests.
 - Show your current network and subnet in the interactive UI.
 
-## Quick start
+### Quick start
 
 This project currently targets Python 3.14 or newer.
 
@@ -32,7 +213,7 @@ If you install the package, you can use the shorter command:
 hyping ui
 ```
 
-## The easiest way to use it
+### The easiest way to use it
 
 Start the interactive UI:
 
@@ -75,7 +256,7 @@ do next:
 5. 返回
 ```
 
-## Command examples
+### Command examples
 
 Find one device by hostname:
 
@@ -113,7 +294,20 @@ Run a TCP test instead of ping:
 PYTHONPATH=src python -m hyping.main load 192.168.10.210 --protocol tcp --port 80
 ```
 
-## About permissions
+Send a larger payload per probe:
+
+```bash
+PYTHONPATH=src python -m hyping.main load 192.168.10.210 --payload-size 1200
+```
+
+For higher TCP bandwidth on a server you control, keep connections open and keep
+sending data:
+
+```bash
+PYTHONPATH=src python -m hyping.main load 192.168.10.210 --protocol tcp --port 80 --payload-size 65536 --tcp-keep-open
+```
+
+### About permissions
 
 Some network actions work better with extra permission.
 
@@ -129,7 +323,7 @@ system ARP cache.
 The UI only shows the elevated permission line when it is actually running with
 that permission.
 
-## About Wi-Fi names
+### About Wi-Fi names
 
 Hyping tries to show the current network, interface, and subnet.
 
@@ -142,7 +336,7 @@ Example:
 On newer macOS versions, the Wi-Fi name may be hidden by the system and shown as
 `SSID: 未获取`. That is normal. The subnet is still useful for finding devices.
 
-## Saved devices
+### Saved devices
 
 Saved devices are stored here by default:
 
@@ -152,7 +346,7 @@ Saved devices are stored here by default:
 
 Use the UI menu `管理已保存设备` to view, select, or delete saved devices.
 
-## Development
+### Development
 
 Run checks:
 
@@ -162,7 +356,7 @@ PYTHONPATH=src .venv-ft/bin/python -m unittest discover -s tests -q
 .venv-ft/bin/python -m compileall -q src
 ```
 
-## Notes
+### Notes
 
 This is a personal network helper, not a full network management platform.
 The goal is simple: find nearby devices quickly and keep the interface easy to

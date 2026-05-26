@@ -202,6 +202,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="small per-worker loop jitter in seconds to avoid synchronized bursts",
     )
     load.add_argument(
+        "--payload-size",
+        type=int,
+        default=0,
+        help=(
+            "bytes to send per probe; for ICMP this maps to ping -s, "
+            "for TCP it sends this many zero bytes after connecting"
+        ),
+    )
+    load.add_argument(
+        "--tcp-keep-open",
+        action="store_true",
+        help=(
+            "with --protocol tcp, keep each connection open and keep sending "
+            "payload chunks until the test ends"
+        ),
+    )
+    load.add_argument(
         "--no-live",
         action="store_true",
         help="disable live terminal UI and print only the final JSON summary",
@@ -232,6 +249,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     refresh_interval=args.refresh,
                     ramp_up=args.ramp_up,
                     per_worker_jitter=args.jitter,
+                    payload_size=args.payload_size,
+                    tcp_keep_open=args.tcp_keep_open,
                 ),
                 live=not args.no_live,
             )

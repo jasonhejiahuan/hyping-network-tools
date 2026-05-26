@@ -27,6 +27,8 @@ class LoadTestConfig:
     refresh_interval: float = 0.25
     ramp_up: float = 0.75
     per_worker_jitter: float = 0.002
+    payload_size: int = 0
+    tcp_keep_open: bool = False
 
 
 @dataclass(slots=True)
@@ -41,6 +43,7 @@ class LoadTestStats:
     total_latency_ms: float = 0.0
     min_latency_ms: float | None = None
     max_latency_ms: float | None = None
+    bytes_sent: int = 0
     recent_latencies_ms: deque[float] = field(
         default_factory=lambda: deque(maxlen=5000)
     )
@@ -51,10 +54,11 @@ class LoadTestStats:
             self.issued += 1
             self.in_flight += 1
 
-    def mark_done(self, *, success: bool, latency_ms: float) -> None:
+    def mark_done(self, *, success: bool, latency_ms: float, bytes_sent: int) -> None:
         with self.lock:
             self.completed += 1
             self.in_flight = max(0, self.in_flight - 1)
+            self.bytes_sent += max(0, bytes_sent)
             self.total_latency_ms += latency_ms
             self.recent_latencies_ms.append(latency_ms)
             if self.min_latency_ms is None or latency_ms < self.min_latency_ms:
@@ -88,6 +92,8 @@ class LoadTestStats:
                 "failed": self.failed,
                 "in_flight": self.in_flight,
                 "rate": self.completed / elapsed,
+                "bytes_sent": self.bytes_sent,
+                "bandwidth_Bps": self.bytes_sent / elapsed,
                 "success_rate": self.succeeded / self.completed
                 if self.completed
                 else None,
@@ -112,6 +118,21 @@ def _format_rate(value: float | int | None) -> str:
     return "-" if value is None else f"{float(value):.1f}/s"
 
 
+def _format_bytes(value: float | int | None) -> str:
+    if value is None:
+        return "-"
+
+    amount = float(value)
+    units = ("B", "KB", "MB", "GB")
+    unit = units[0]
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            break
+        amount /= 1024
+
+    return f"{amount:.1f} {unit}"
+
+
 def _terminal_width() -> int:
     return max(72, shutil.get_terminal_size(fallback=(100, 24)).columns)
 
@@ -126,21 +147,29 @@ def _progress_bar(done: int, total: int | None, *, width: int) -> str:
     return f"{'█' * filled}{'░' * (width - filled)} {ratio * 100:5.1f}%"
 
 
-def _ping_args(target: str, timeout: float) -> list[str]:
+def _ping_args(target: str, timeout: float, payload_size: int) -> list[str]:
     if sys.platform == "darwin":
         wait_arg = str(max(100, int(timeout * 1000)))
     else:
         wait_arg = str(max(1, math.ceil(timeout)))
 
-    return ["ping", "-n", "-c", "1", "-W", wait_arg, target]
+    args = ["ping", "-n", "-c", "1", "-W", wait_arg]
+    if payload_size > 0:
+        args.extend(["-s", str(payload_size)])
+    args.append(target)
+    return args
 
 
-def _icmp_probe(target: str, timeout: float) -> tuple[bool, float]:
+def _icmp_probe(
+    target: str,
+    timeout: float,
+    payload_size: int = 0,
+) -> tuple[bool, float, int]:
     started = time.perf_counter()
     elapsed_ms = 0.0
     try:
         result = subprocess.run(
-            _ping_args(target, timeout),
+            _ping_args(target, timeout, payload_size),
             check=False,
             capture_output=True,
             text=True,
@@ -150,7 +179,7 @@ def _icmp_probe(target: str, timeout: float) -> tuple[bool, float]:
         success = result.returncode == 0
         match = _PING_TIME_RE.search(result.stdout)
         if match is not None:
-            return success, float(match.group(1))
+            return success, float(match.group(1)), payload_size if success else 0
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
         elapsed_ms = (time.perf_counter() - started) * 1000
         success = False
@@ -158,28 +187,71 @@ def _icmp_probe(target: str, timeout: float) -> tuple[bool, float]:
     if elapsed_ms == 0.0:
         elapsed_ms = (time.perf_counter() - started) * 1000
 
-    return success, elapsed_ms
+    return success, elapsed_ms, payload_size if success else 0
 
 
-def _tcp_probe(target: str, port: int, timeout: float) -> tuple[bool, float]:
+def _tcp_probe(
+    target: str,
+    port: int,
+    timeout: float,
+    payload_size: int = 0,
+) -> tuple[bool, float, int]:
     started = time.perf_counter()
     try:
-        with socket.create_connection((target, port), timeout=timeout):
+        with socket.create_connection((target, port), timeout=timeout) as sock:
+            bytes_sent = 0
+            if payload_size > 0:
+                sock.settimeout(timeout)
+                payload = b"\0" * payload_size
+                sock.sendall(payload)
+                bytes_sent = payload_size
             success = True
     except OSError:
-        success = False
+        return False, (time.perf_counter() - started) * 1000, 0
 
-    return success, (time.perf_counter() - started) * 1000
+    return success, (time.perf_counter() - started) * 1000, bytes_sent
 
 
-def _probe(config: LoadTestConfig) -> tuple[bool, float]:
+def _tcp_stream_until(
+    target: str,
+    port: int,
+    timeout: float,
+    payload_size: int,
+    stop_event: threading.Event,
+    deadline: float | None,
+) -> tuple[bool, float, int]:
+    started = time.perf_counter()
+    chunk_size = payload_size or 65536
+    payload = b"\0" * chunk_size
+    bytes_sent = 0
+
+    try:
+        with socket.create_connection((target, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            while not stop_event.is_set():
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                sock.sendall(payload)
+                bytes_sent += chunk_size
+    except OSError:
+        return bytes_sent > 0, (time.perf_counter() - started) * 1000, bytes_sent
+
+    return True, (time.perf_counter() - started) * 1000, bytes_sent
+
+
+def _probe(config: LoadTestConfig) -> tuple[bool, float, int]:
     if config.protocol == "tcp":
         if config.tcp_port is None:
             msg = "tcp_port is required for tcp protocol"
             raise ValueError(msg)
-        return _tcp_probe(config.target, config.tcp_port, config.timeout)
+        return _tcp_probe(
+            config.target,
+            config.tcp_port,
+            config.timeout,
+            config.payload_size,
+        )
 
-    return _icmp_probe(config.target, config.timeout)
+    return _icmp_probe(config.target, config.timeout, config.payload_size)
 
 
 def _validate_config(config: LoadTestConfig) -> None:
@@ -207,8 +279,14 @@ def _validate_config(config: LoadTestConfig) -> None:
     if config.per_worker_jitter < 0:
         msg = "per_worker_jitter must not be negative"
         raise ValueError(msg)
+    if config.payload_size < 0:
+        msg = "payload_size must not be negative"
+        raise ValueError(msg)
     if config.protocol == "tcp" and config.tcp_port is None:
         msg = "tcp_port is required for tcp protocol"
+        raise ValueError(msg)
+    if config.tcp_keep_open and config.protocol != "tcp":
+        msg = "tcp_keep_open can only be used with tcp protocol"
         raise ValueError(msg)
 
 
@@ -246,11 +324,27 @@ def _worker(
             time.sleep(config.per_worker_jitter * ((worker_index % 7) + 1) / 7)
 
         try:
-            success, latency_ms = _probe(config)
+            if config.tcp_keep_open:
+                if config.tcp_port is None:
+                    raise ValueError
+                success, latency_ms, bytes_sent = _tcp_stream_until(
+                    config.target,
+                    config.tcp_port,
+                    config.timeout,
+                    config.payload_size,
+                    stop_event,
+                    deadline,
+                )
+            else:
+                success, latency_ms, bytes_sent = _probe(config)
         except Exception:
-            success, latency_ms = False, 0.0
+            success, latency_ms, bytes_sent = False, 0.0, 0
 
-        stats.mark_done(success=success, latency_ms=latency_ms)
+        stats.mark_done(
+            success=success,
+            latency_ms=latency_ms,
+            bytes_sent=bytes_sent,
+        )
 
 
 def _render(config: LoadTestConfig, stats: LoadTestStats) -> None:
@@ -267,9 +361,12 @@ def _render(config: LoadTestConfig, stats: LoadTestStats) -> None:
     print(
         f"并发: {config.concurrency}  "
         f"超时: {config.timeout}s  "
+        f"负载: {_format_bytes(config.payload_size)}  "
         f"渐进启动: {config.ramp_up}s  "
         f"模式: {'包数' if config.count else '时长'}"
     )
+    if config.tcp_keep_open:
+        print("TCP 模式: 保持连接并持续发送")
     if config.duration is not None:
         print(f"时长: {config.duration}s")
     if config.count is not None:
@@ -295,7 +392,12 @@ def _render(config: LoadTestConfig, stats: LoadTestStats) -> None:
         if snap["success_rate"] is not None
         else "-"
     )
-    print(f"吞吐: {_format_rate(snap['rate'])}  成功率: {success_rate}")
+    print(
+        f"吞吐: {_format_rate(snap['rate'])}  "
+        f"发送: {_format_bytes(snap['bytes_sent'])}  "
+        f"带宽: {_format_bytes(snap['bandwidth_Bps'])}/s  "
+        f"成功率: {success_rate}"
+    )
     print(
         f"延迟 avg/min/max/p95_recent: "
         f"{_format_ms(snap['avg_latency_ms'])} / "
