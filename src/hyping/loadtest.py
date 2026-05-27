@@ -44,6 +44,13 @@ class LoadTestStats:
     min_latency_ms: float | None = None
     max_latency_ms: float | None = None
     bytes_sent: int = 0
+    last_sample_at: float = field(default_factory=time.perf_counter)
+    last_sample_completed: int = 0
+    last_sample_bytes_sent: int = 0
+    recent_rates: deque[float] = field(default_factory=lambda: deque(maxlen=5000))
+    recent_bandwidths_Bps: deque[float] = field(
+        default_factory=lambda: deque(maxlen=5000)
+    )
     recent_latencies_ms: deque[float] = field(
         default_factory=lambda: deque(maxlen=5000)
     )
@@ -71,6 +78,21 @@ class LoadTestStats:
             else:
                 self.failed += 1
 
+    def mark_sample(self) -> None:
+        with self.lock:
+            now = time.perf_counter()
+            elapsed = now - self.last_sample_at
+            if elapsed <= 0:
+                return
+
+            completed_delta = self.completed - self.last_sample_completed
+            bytes_delta = self.bytes_sent - self.last_sample_bytes_sent
+            self.recent_rates.append(completed_delta / elapsed)
+            self.recent_bandwidths_Bps.append(bytes_delta / elapsed)
+            self.last_sample_at = now
+            self.last_sample_completed = self.completed
+            self.last_sample_bytes_sent = self.bytes_sent
+
     def finish(self) -> None:
         with self.lock:
             self.finished_at = time.perf_counter()
@@ -80,10 +102,14 @@ class LoadTestStats:
             now = self.finished_at or time.perf_counter()
             elapsed = max(now - self.started_at, 0.000001)
             recent = list(self.recent_latencies_ms)
+            recent_rates = list(self.recent_rates)
+            recent_bandwidths = list(self.recent_bandwidths_Bps)
             avg_latency = (
                 self.total_latency_ms / self.completed if self.completed else None
             )
             p95_latency = _percentile(recent, 95) if recent else None
+            rate = self.completed / elapsed
+            bandwidth = self.bytes_sent / elapsed
             return {
                 "elapsed": elapsed,
                 "issued": self.issued,
@@ -91,9 +117,25 @@ class LoadTestStats:
                 "succeeded": self.succeeded,
                 "failed": self.failed,
                 "in_flight": self.in_flight,
-                "rate": self.completed / elapsed,
+                "rate": rate,
+                "avg_rate": rate if self.completed else None,
+                "min_rate": min(recent_rates) if recent_rates else None,
+                "max_rate": max(recent_rates) if recent_rates else None,
+                "recent_p95_rate": _percentile(recent_rates, 95)
+                if recent_rates
+                else None,
                 "bytes_sent": self.bytes_sent,
-                "bandwidth_Bps": self.bytes_sent / elapsed,
+                "bandwidth_Bps": bandwidth,
+                "avg_bandwidth_Bps": bandwidth if self.bytes_sent else None,
+                "min_bandwidth_Bps": min(recent_bandwidths)
+                if recent_bandwidths
+                else None,
+                "max_bandwidth_Bps": max(recent_bandwidths)
+                if recent_bandwidths
+                else None,
+                "recent_p95_bandwidth_Bps": _percentile(recent_bandwidths, 95)
+                if recent_bandwidths
+                else None,
                 "success_rate": self.succeeded / self.completed
                 if self.completed
                 else None,
@@ -131,6 +173,10 @@ def _format_bytes(value: float | int | None) -> str:
         amount /= 1024
 
     return f"{amount:.1f} {unit}"
+
+
+def _format_bandwidth(value: float | int | None) -> str:
+    return "-" if value is None else f"{_format_bytes(value)}/s"
 
 
 def _terminal_width() -> int:
@@ -395,8 +441,22 @@ def _render(config: LoadTestConfig, stats: LoadTestStats) -> None:
     print(
         f"吞吐: {_format_rate(snap['rate'])}  "
         f"发送: {_format_bytes(snap['bytes_sent'])}  "
-        f"带宽: {_format_bytes(snap['bandwidth_Bps'])}/s  "
+        f"带宽: {_format_bandwidth(snap['bandwidth_Bps'])}  "
         f"成功率: {success_rate}"
+    )
+    print(
+        f"吞吐 avg/min/max/p95_recent: "
+        f"{_format_rate(snap['avg_rate'])} / "
+        f"{_format_rate(snap['min_rate'])} / "
+        f"{_format_rate(snap['max_rate'])} / "
+        f"{_format_rate(snap['recent_p95_rate'])}"
+    )
+    print(
+        f"带宽 avg/min/max/p95_recent: "
+        f"{_format_bandwidth(snap['avg_bandwidth_Bps'])} / "
+        f"{_format_bandwidth(snap['min_bandwidth_Bps'])} / "
+        f"{_format_bandwidth(snap['max_bandwidth_Bps'])} / "
+        f"{_format_bandwidth(snap['recent_p95_bandwidth_Bps'])}"
     )
     print(
         f"延迟 avg/min/max/p95_recent: "
@@ -435,6 +495,7 @@ def run_load_test(config: LoadTestConfig, *, live: bool = True) -> dict[str, obj
                     break
                 if live:
                     _render(config, stats)
+                    stats.mark_sample()
                 time.sleep(config.refresh_interval)
     except KeyboardInterrupt:
         stop_event.set()
@@ -442,6 +503,7 @@ def run_load_test(config: LoadTestConfig, *, live: bool = True) -> dict[str, obj
         stop_event.set()
         stats.finish()
         if live:
+            stats.mark_sample()
             _render(config, stats)
             print()
 

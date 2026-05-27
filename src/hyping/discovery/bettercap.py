@@ -210,13 +210,31 @@ class BettercapClient:
             raise BettercapAPIError(msg)
         return response
 
-    def start_discovery(self) -> None:
+    def start_discovery(
+        self,
+        *,
+        warmup: float = 3.0,
+        on_starting: Callable[[str], None] | None = None,
+    ) -> None:
+        started_modules: list[str] = []
         for command in ("net.recon on", "net.probe on"):
             try:
                 self.command(command)
+                started_modules.append(command.removesuffix(" on"))
             except BettercapAPIError as exc:
                 if "already running" not in str(exc).casefold():
                     raise
+
+        if started_modules and warmup > 0:
+            for module in started_modules:
+                if on_starting is not None:
+                    on_starting(module)
+            time.sleep(warmup)
+
+    def shutdown(self) -> None:
+        """Ask Bettercap to exit through its REST command API."""
+
+        self.command("quit")
 
     def session(self) -> dict[str, Any]:
         response = self.request("/api/session")
@@ -235,6 +253,8 @@ def iter_bettercap_hosts(
     wait: float = 5.0,
     poll_interval: float = 0.5,
     start_discovery: bool = True,
+    discovery_warmup: float = 3.0,
+    on_discovery_starting: Callable[[str], None] | None = None,
 ) -> Iterator[BettercapHost]:
     if wait < 0:
         msg = "wait must not be negative"
@@ -244,7 +264,15 @@ def iter_bettercap_hosts(
         raise ValueError(msg)
 
     if start_discovery:
-        client.start_discovery()
+        try:
+            client.start_discovery(
+                warmup=discovery_warmup,
+                on_starting=on_discovery_starting,
+            )
+        except TypeError:
+            # Keep tests and user-provided lightweight client fakes compatible
+            # with the older no-argument start_discovery() shape.
+            client.start_discovery()
 
     deadline = time.monotonic() + wait
     seen: set[IPv4Address] = set()
@@ -267,6 +295,8 @@ def list_bettercap_hosts(
     wait: float = 5.0,
     poll_interval: float = 0.5,
     start_discovery: bool = True,
+    discovery_warmup: float = 3.0,
+    on_discovery_starting: Callable[[str], None] | None = None,
     on_host: Callable[[BettercapHost], None] | None = None,
 ) -> list[BettercapHost]:
     hosts: list[BettercapHost] = []
@@ -275,6 +305,8 @@ def list_bettercap_hosts(
         wait=wait,
         poll_interval=poll_interval,
         start_discovery=start_discovery,
+        discovery_warmup=discovery_warmup,
+        on_discovery_starting=on_discovery_starting,
     ):
         hosts.append(host)
         if on_host is not None:

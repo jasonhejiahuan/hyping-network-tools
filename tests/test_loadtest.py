@@ -12,7 +12,10 @@ class LoadTestTests(unittest.TestCase):
             time.sleep(0.001)
             return True, 1.0, config.payload_size
 
-        with patch("hyping.loadtest._probe", fake_probe):
+        with (
+            patch("hyping.loadtest._probe", fake_probe),
+            patch("hyping.loadtest._render"),
+        ):
             summary = run_load_test(
                 LoadTestConfig(
                     target="127.0.0.1",
@@ -99,7 +102,10 @@ class LoadTestTests(unittest.TestCase):
         def fake_probe(config):
             return True, 1.0, config.payload_size
 
-        with patch("hyping.loadtest._probe", fake_probe):
+        with (
+            patch("hyping.loadtest._probe", fake_probe),
+            patch("hyping.loadtest._render"),
+        ):
             summary = run_load_test(
                 LoadTestConfig(
                     target="127.0.0.1",
@@ -116,6 +122,37 @@ class LoadTestTests(unittest.TestCase):
 
         self.assertEqual(summary["bytes_sent"], 1536)
         self.assertGreater(summary["bandwidth_Bps"], 0)
+        self.assertEqual(summary["avg_bandwidth_Bps"], summary["bandwidth_Bps"])
+
+    def test_live_sampling_tracks_rate_and_bandwidth_windows(self) -> None:
+        def fake_probe(config):
+            time.sleep(0.001)
+            return True, 1.0, 128
+
+        with (
+            patch("hyping.loadtest._probe", fake_probe),
+            patch("hyping.loadtest._render"),
+        ):
+            summary = run_load_test(
+                LoadTestConfig(
+                    target="127.0.0.1",
+                    concurrency=2,
+                    duration=None,
+                    count=6,
+                    timeout=0.1,
+                    refresh_interval=0.001,
+                    ramp_up=0,
+                    per_worker_jitter=0,
+                ),
+                live=True,
+            )
+
+        self.assertIsNotNone(summary["min_rate"])
+        self.assertIsNotNone(summary["max_rate"])
+        self.assertIsNotNone(summary["recent_p95_rate"])
+        self.assertIsNotNone(summary["min_bandwidth_Bps"])
+        self.assertIsNotNone(summary["max_bandwidth_Bps"])
+        self.assertIsNotNone(summary["recent_p95_bandwidth_Bps"])
 
     def test_tcp_keep_open_requires_tcp(self) -> None:
         with self.assertRaises(ValueError):

@@ -1,8 +1,10 @@
 import argparse
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
+from hyping.config import ensure_config
 from hyping.discovery.arp import can_run_active_arp_scan, list_network_devices
 from hyping.discovery.bettercap import (
     BettercapAPIError,
@@ -81,7 +83,14 @@ def _print_scan_item(index: int, item) -> None:
     )
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentParser:
+    config = config or {}
+    scan_config = config.get("scan", {})
+    bettercap_config = config.get("bettercap", {})
+    load_config = config.get("load", {})
+    locate_config = config.get("locate", {})
+    mdns_config = config.get("mdns", {})
+
     parser = argparse.ArgumentParser(
         prog="hyping",
         description="Locate LAN devices by hostname or human note.",
@@ -111,23 +120,26 @@ def _build_parser() -> argparse.ArgumentParser:
     locate.add_argument(
         "--timeout",
         type=float,
-        default=1.0,
+        default=locate_config.get("timeout", 1.0),
         help="ARP scan/ping timeout in seconds",
     )
     locate.add_argument(
         "--partial-hostname",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=locate_config.get("partial_hostname", False),
         help="allow substring hostname matching for known/scanned devices",
     )
     locate.add_argument(
         "--partial-note",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=locate_config.get("partial_note", False),
         help="allow substring note matching for note aliases/inventory",
     )
     locate.add_argument(
-        "--no-prime-arp-cache",
-        action="store_true",
-        help="do not ping the resolved IP before reading the local ARP cache",
+        "--prime-arp-cache",
+        action=argparse.BooleanOptionalAction,
+        default=locate_config.get("prime_arp_cache", True),
+        help="ping the resolved IP before reading the local ARP cache",
     )
 
     scan = subparsers.add_parser(
@@ -137,79 +149,94 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument(
         "--network",
-        default="auto",
+        default=scan_config.get("network", "auto"),
         help="CIDR for builtin scan, e.g. 192.168.1.0/24; defaults to auto",
     )
     scan.add_argument(
         "--scanner",
         choices=["bettercap", "builtin"],
-        default="bettercap",
+        default=scan_config.get("scanner", "bettercap"),
         help="scanner backend; defaults to Bettercap REST API",
     )
     scan.add_argument(
         "--bettercap-url",
-        default="http://127.0.0.1:8081",
+        default=bettercap_config.get("url", "http://127.0.0.1:8081"),
         help="Bettercap REST API base URL",
     )
     scan.add_argument(
         "--bettercap-user",
-        default="user",
+        default=bettercap_config.get("username", "user"),
         help="Bettercap REST API username",
     )
     scan.add_argument(
         "--bettercap-pass",
-        default="pass",
+        default=bettercap_config.get("password", "pass"),
         help="Bettercap REST API password",
+    )
+    scan.add_argument(
+        "--bettercap-api-timeout",
+        type=float,
+        default=bettercap_config.get("api_timeout", 3.0),
+        help="Bettercap REST API request timeout in seconds",
     )
     scan.add_argument(
         "--bettercap-wait",
         type=float,
-        default=5.0,
+        default=bettercap_config.get("wait", 5.0),
         help="seconds to poll Bettercap for newly discovered hosts",
     )
     scan.add_argument(
         "--bettercap-poll",
         type=float,
-        default=0.5,
+        default=bettercap_config.get("poll_interval", 0.5),
         help="Bettercap polling interval in seconds",
     )
     scan.add_argument(
-        "--no-start-bettercap",
-        action="store_true",
-        help="do not send 'net.recon on' and 'net.probe on' to Bettercap",
+        "--bettercap-discovery-warmup",
+        type=float,
+        default=bettercap_config.get("discovery_warmup", 3.0),
+        help="seconds to wait after starting net.recon/net.probe",
+    )
+    scan.add_argument(
+        "--start-bettercap",
+        action=argparse.BooleanOptionalAction,
+        default=bettercap_config.get("start_discovery", True),
+        help="send 'net.recon on' and 'net.probe on' to Bettercap",
     )
     scan.add_argument(
         "--timeout",
         type=float,
-        default=0.5,
+        default=scan_config.get("timeout", 0.5),
         help="seconds to wait for each ARP batch; 0.3-1.0 is usually enough",
     )
     scan.add_argument(
         "--passes",
         type=int,
-        default=3,
+        default=scan_config.get("passes", 3),
         help="number of scan passes; repeating finds more Wi-Fi clients",
     )
     scan.add_argument(
         "--batch-size",
         type=int,
-        default=64,
+        default=scan_config.get("batch_size", 64),
         help="number of IPs to probe per batch",
     )
     scan.add_argument(
         "--interval",
         type=float,
-        default=0.002,
+        default=scan_config.get("interval", 0.002),
         help="small delay between ARP packets in seconds",
     )
     scan.add_argument(
-        "--no-resolve-hostnames",
-        action="store_true",
-        help="do not try reverse DNS for discovered devices",
+        "--resolve-hostnames",
+        action=argparse.BooleanOptionalAction,
+        default=scan_config.get("resolve_hostnames", True),
+        help="try reverse DNS for discovered devices",
     )
     scan.add_argument(
         "--json",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=scan_config.get("json", False),
         help="print only the final JSON list instead of progressive rows",
     )
 
@@ -236,23 +263,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mdns_info.add_argument(
         "--domain",
-        default="local",
+        default=mdns_config.get("domain", "local"),
         help="Bonjour domain; defaults to local",
     )
     mdns_info.add_argument(
         "--timeout",
         type=float,
-        default=1.0,
+        default=mdns_config.get("timeout", 1.0),
         help="seconds to wait for each dns-sd browse/resolve step",
     )
     mdns_info.add_argument(
         "--first",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=mdns_config.get("first", False),
         help="print only the first matching service",
     )
     mdns_info.add_argument(
         "--merge",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=mdns_config.get("merge", False),
         help="merge all matching services for the hostname into one key/value list",
     )
 
@@ -277,59 +306,61 @@ def _build_parser() -> argparse.ArgumentParser:
     load.add_argument(
         "--protocol",
         choices=["icmp", "tcp"],
-        default="icmp",
+        default=load_config.get("protocol", "icmp"),
         help="probe protocol; defaults to icmp",
     )
     load.add_argument(
         "--port",
         type=int,
-        help="TCP port; required when --protocol tcp",
+        default=load_config.get("tcp_port", 5000),
+        help="TCP port; defaults to 5000",
     )
     load.add_argument(
         "--concurrency",
         type=int,
-        default=32,
+        default=load_config.get("concurrency", 32),
         help="number of worker threads",
     )
     load.add_argument(
         "--duration",
         type=float,
-        default=10.0,
+        default=load_config.get("duration", 10.0),
         help="test duration in seconds; use 0 with --count for count-only mode",
     )
     load.add_argument(
         "--count",
         type=int,
+        default=load_config.get("count"),
         help="total probe count across all workers",
     )
     load.add_argument(
         "--timeout",
         type=float,
-        default=1.0,
+        default=load_config.get("timeout", 1.0),
         help="per-probe timeout in seconds",
     )
     load.add_argument(
         "--refresh",
         type=float,
-        default=0.25,
+        default=load_config.get("refresh_interval", 0.25),
         help="live UI refresh interval in seconds",
     )
     load.add_argument(
         "--ramp-up",
         type=float,
-        default=0.75,
+        default=load_config.get("ramp_up", 0.75),
         help="seconds used to gradually start worker threads; 0 starts at once",
     )
     load.add_argument(
         "--jitter",
         type=float,
-        default=0.002,
+        default=load_config.get("per_worker_jitter", 0.002),
         help="small per-worker loop jitter in seconds to avoid synchronized bursts",
     )
     load.add_argument(
         "--payload-size",
         type=int,
-        default=0,
+        default=load_config.get("payload_size", 0),
         help=(
             "bytes to send per probe; for ICMP this maps to ping -s, "
             "for TCP it sends this many zero bytes after connecting"
@@ -337,7 +368,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     load.add_argument(
         "--tcp-keep-open",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=load_config.get("tcp_keep_open", False),
         help=(
             "with --protocol tcp, keep each connection open and keep sending "
             "payload chunks until the test ends"
@@ -353,11 +385,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = _build_parser()
+    config = ensure_config()
+    parser = _build_parser(config)
     args = parser.parse_args(argv)
 
     if args.command in {"ui", "interactive"}:
-        return run_interactive(args.store)
+        return run_interactive(args.store, config=config)
 
     if args.command in {"load", "ping-load"}:
         duration = None if args.duration == 0 else args.duration
@@ -406,13 +439,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.bettercap_url,
                     args.bettercap_user,
                     args.bettercap_pass,
-                    timeout=args.timeout,
+                    timeout=args.bettercap_api_timeout,
                 )
                 items = list_bettercap_hosts(
                     client,
                     wait=args.bettercap_wait,
                     poll_interval=args.bettercap_poll,
-                    start_discovery=not args.no_start_bettercap,
+                    start_discovery=args.start_bettercap,
+                    discovery_warmup=args.bettercap_discovery_warmup,
+                    on_discovery_starting=None
+                    if args.json
+                    else lambda module: print(
+                        f"{module} 正在启动，等待 "
+                        f"{args.bettercap_discovery_warmup:g} 秒预热...",
+                        flush=True,
+                    ),
                     on_host=None if args.json else on_item,
                 )
             else:
@@ -434,7 +475,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     passes=args.passes,
                     batch_size=args.batch_size,
                     interval=args.interval,
-                    resolve_hostnames=not args.no_resolve_hostnames,
+                    resolve_hostnames=args.resolve_hostnames,
                     on_device=None if args.json else on_item,
                 )
         except BettercapAPIError as exc:
@@ -450,7 +491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             print(f"\n扫描完成，发现 {len(items)} 台设备。")
-            if args.scanner == "builtin" and not args.no_resolve_hostnames:
+            if args.scanner == "builtin" and args.resolve_hostnames:
                 print("\n最终列表：")
                 _print_scan_header()
                 for index, item in enumerate(items, start=1):
@@ -520,7 +561,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             partial_hostname=args.partial_hostname,
             partial_note=args.partial_note,
-            prime_arp_cache=not args.no_prime_arp_cache,
+            prime_arp_cache=args.prime_arp_cache,
         )
     except argparse.ArgumentTypeError as exc:
         parser.exit(2, f"{exc}\n")

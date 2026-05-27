@@ -2,9 +2,12 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Mapping
 from ipaddress import IPv4Address
 from pathlib import Path
+from typing import Any
 
+from hyping.config import ensure_config
 from hyping.discovery.arp import can_run_active_arp_scan, list_network_devices
 from hyping.discovery.bettercap import (
     BettercapAPIError,
@@ -299,27 +302,90 @@ def _located_devices_action_flow(
             _clear_screen()
 
 
-def _scan_network_flow(store_path: Path) -> DeviceRecord | None:
+def _scan_network_flow(
+    store_path: Path,
+    config: Mapping[str, Any],
+) -> DeviceRecord | None:
     _title("列出当前网段设备")
-    scanner = _ask("扫描来源 bettercap/builtin", "bettercap").casefold()
-    if scanner not in {"bettercap", "builtin"}:
-        print("扫描来源只能是 bettercap 或 builtin。")
-        return None
+
+    scan_config = config.get("scan", {})
+    bettercap_config = config.get("bettercap", {})
+
+    scanner = str(scan_config.get("scanner", "bettercap")).casefold()
+    network = str(scan_config.get("network", "auto"))
+    timeout = float(scan_config.get("timeout", 0.5))
+    passes = int(scan_config.get("passes", 3))
+    batch_size = int(scan_config.get("batch_size", 64))
+    interval = float(scan_config.get("interval", 0.002))
+    resolve_hostnames = bool(scan_config.get("resolve_hostnames", True))
+
+    api_url = str(bettercap_config.get("url", "http://127.0.0.1:8081"))
+    api_user = str(bettercap_config.get("username", "user"))
+    api_pass = str(bettercap_config.get("password", "pass"))
+    api_timeout = float(bettercap_config.get("api_timeout", 3.0))
+    wait = float(bettercap_config.get("wait", 5.0))
+    poll_interval = float(bettercap_config.get("poll_interval", 0.5))
+    start_discovery = bool(bettercap_config.get("start_discovery", True))
+    discovery_warmup = float(bettercap_config.get("discovery_warmup", 3.0))
 
     try:
+        print("\n将使用这些参数：")
+        print(f"扫描来源: {scanner}")
         if scanner == "bettercap":
-            api_url = _ask("Bettercap API 地址", "http://127.0.0.1:8081")
-            api_user = _ask("Bettercap 用户名", "user")
-            api_pass = _ask("Bettercap 密码", "pass")
-            api_timeout = float(_ask("API 超时时间秒", "3.0"))
-            wait = float(_ask("持续读取 Bettercap 秒数", "5.0"))
-            poll_interval = float(_ask("刷新间隔秒", "0.5"))
-            start_discovery = _yes("是否自动启动 net.recon/net.probe", default=True)
+            print(f"Bettercap API 地址: {api_url}")
+            print(f"Bettercap 用户名: {api_user}")
+            print(f"API 超时时间秒: {api_timeout}")
+            print(f"持续读取 Bettercap 秒数: {wait}")
+            print(f"刷新间隔秒: {poll_interval}")
+            print(f"自动启动 net.recon/net.probe: {'是' if start_discovery else '否'}")
+            print(f"net.recon/net.probe 预热秒数: {discovery_warmup}")
+        elif scanner == "builtin":
+            print(f"扫描网段: {network}")
+            print(f"每批等待秒: {timeout}")
+            print(f"扫描轮数: {passes}")
+            print(f"每批扫描 IP 数: {batch_size}")
+            print(f"ARP 包间隔秒: {interval}")
+            print(f"解析 hostname: {'是' if resolve_hostnames else '否'}")
         else:
-            network = _ask("扫描网段；留空自动检测", "")
-            if not network:
-                network = detect_local_ipv4_network()
-                if network:
+            print("扫描来源只能是 bettercap 或 builtin。")
+            return None
+
+        if _yes("是否修改参数", default=False):
+            scanner = _ask("扫描来源 bettercap/builtin", scanner).casefold()
+            if scanner not in {"bettercap", "builtin"}:
+                print("扫描来源只能是 bettercap 或 builtin。")
+                return None
+
+            if scanner == "bettercap":
+                api_url = _ask("Bettercap API 地址", api_url)
+                api_user = _ask("Bettercap 用户名", api_user)
+                api_pass = _ask("Bettercap 密码", api_pass)
+                api_timeout = float(_ask("API 超时时间秒", str(api_timeout)))
+                wait = float(_ask("持续读取 Bettercap 秒数", str(wait)))
+                poll_interval = float(_ask("刷新间隔秒", str(poll_interval)))
+                start_discovery = _yes(
+                    "是否自动启动 net.recon/net.probe",
+                    default=start_discovery,
+                )
+                discovery_warmup = float(
+                    _ask("net.recon/net.probe 预热秒数", str(discovery_warmup))
+                )
+            else:
+                network = _ask("扫描网段；auto 表示自动检测", network)
+                timeout = float(_ask("每批等待秒；0.3-1.0 通常够用", str(timeout)))
+                passes = int(_ask("扫描轮数；轮数越多发现越全", str(passes)))
+                batch_size = int(_ask("每批扫描 IP 数", str(batch_size)))
+                interval = float(_ask("ARP 包间隔秒", str(interval)))
+                resolve_hostnames = _yes(
+                    "是否尝试解析 hostname",
+                    default=resolve_hostnames,
+                )
+
+        if scanner == "builtin":
+            if not network or network.casefold() == "auto":
+                detected = detect_local_ipv4_network()
+                if detected:
+                    network = detected
                     print(f"已自动检测本机网段：{network}")
                 else:
                     print("未能自动检测本机网段。")
@@ -329,12 +395,6 @@ def _scan_network_flow(store_path: Path) -> DeviceRecord | None:
                 print("当前没有 root 权限，无法主动扫描整个网段。")
                 print("建议使用 Bettercap；或用 sudo 启动内置扫描。")
                 return None
-
-            timeout = float(_ask("每批等待秒；0.3-1.0 通常够用", "0.5"))
-            passes = int(_ask("扫描轮数；轮数越多发现越全", "3"))
-            batch_size = int(_ask("每批扫描 IP 数", "64"))
-            interval = float(_ask("ARP 包间隔秒", "0.002"))
-            resolve_hostnames = _yes("是否尝试解析 hostname", default=True)
     except ValueError:
         print("参数格式无效。")
         return None
@@ -363,6 +423,11 @@ def _scan_network_flow(store_path: Path) -> DeviceRecord | None:
                 wait=wait,
                 poll_interval=poll_interval,
                 start_discovery=start_discovery,
+                discovery_warmup=discovery_warmup,
+                on_discovery_starting=lambda module: print(
+                    f"{module} 正在启动，等待 {discovery_warmup:g} 秒预热...",
+                    flush=True,
+                ),
                 on_host=on_device,
             )
         else:
@@ -589,8 +654,12 @@ def _saved_devices_flow(
             _pause()
 
 
-def _load_test_flow(current: DeviceRecord | None = None) -> None:
+def _load_test_flow(
+    current: DeviceRecord | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> None:
     _title("并发 ping / TCP 负载测试")
+    load_config = (config or {}).get("load", {})
     default_target = None
     if current is not None:
         default_target = current.get("ip") or current.get("hostname")
@@ -600,39 +669,67 @@ def _load_test_flow(current: DeviceRecord | None = None) -> None:
         print("目标不能为空。")
         return
 
-    protocol = _ask("协议 icmp/tcp", "icmp").casefold()
+    protocol = _ask(
+        "协议 icmp/tcp",
+        str(load_config.get("protocol", "icmp")),
+    ).casefold()
     if protocol not in {"icmp", "tcp"}:
         print("协议只能是 icmp 或 tcp。")
         return
 
-    port: int | None = None
-    if protocol == "tcp":
-        port_text = _ask("TCP 端口", "80")
-        try:
-            port = int(port_text)
-        except ValueError:
-            print("端口无效。")
-            return
+    port: int | None = (
+        int(load_config.get("tcp_port", 5000))
+        if protocol == "tcp"
+        else None
+    )
+    concurrency = int(load_config.get("concurrency", 32))
+    duration_value = load_config.get("duration", 10.0)
+    duration: float | None = None if duration_value is None else float(duration_value)
+    count_value = load_config.get("count")
+    count: int | None = None if count_value is None else int(count_value)
+    timeout = float(load_config.get("timeout", 1.0))
+    payload_size = int(load_config.get("payload_size", 0))
+    tcp_keep_open = bool(load_config.get("tcp_keep_open", False))
+    ramp_up = float(load_config.get("ramp_up", 0.75))
+    jitter = float(load_config.get("per_worker_jitter", 0.002))
 
     try:
-        concurrency = int(_ask("并发线程数", "32"))
-        duration_text = _ask("持续时间秒；输入 0 则仅按总数量", "10")
-        count_text = _ask("总请求/包数；留空则按持续时间")
-        timeout = float(_ask("单次超时时间秒", "1.0"))
-        payload_size = int(_ask("每次发送负载字节数；0 表示默认", "0"))
-        tcp_keep_open = False
+        print("\n将使用这些参数：")
+        print(f"目标: {target}")
+        print(f"协议: {protocol}")
         if protocol == "tcp":
-            tcp_keep_open = _yes("是否保持 TCP 连接并持续发送", default=False)
-        ramp_up = float(_ask("渐进启动秒数；0 表示同时启动", "0.75"))
-        jitter = float(_ask("线程错峰抖动秒数", "0.002"))
+            print(f"TCP 端口: {port}")
+            print(f"保持连接持续发送: {'是' if tcp_keep_open else '否'}")
+        print(f"并发线程数: {concurrency}")
+        print(f"持续时间秒: {duration}")
+        print(f"总请求/包数: {'按持续时间' if count is None else count}")
+        print(f"单次超时时间秒: {timeout}")
+        print(f"每次发送负载字节数: {payload_size}")
+        print(f"渐进启动秒数: {ramp_up}")
+        print(f"线程错峰抖动秒数: {jitter}")
+
+        if _yes("是否修改参数", default=False):
+            if protocol == "tcp":
+                port = int(_ask("TCP 端口", str(port)))
+                tcp_keep_open = _yes(
+                    "是否保持 TCP 连接并持续发送",
+                    default=tcp_keep_open,
+                )
+            concurrency = int(_ask("并发线程数", str(concurrency)))
+            duration_text = _ask("持续时间秒；输入 0 则仅按总数量", str(duration))
+            count_text = _ask("总请求/包数；留空则按持续时间")
+            timeout = float(_ask("单次超时时间秒", str(timeout)))
+            payload_size = int(_ask("每次发送负载字节数；0 表示默认", "0"))
+            ramp_up = float(_ask("渐进启动秒数；0 表示同时启动", str(ramp_up)))
+            jitter = float(_ask("线程错峰抖动秒数", str(jitter)))
+
+            duration = None if duration_text in {"", "0"} else float(duration_text)
+            count = int(count_text) if count_text else None
+            if duration is None and count is None:
+                duration = float(load_config.get("duration", 10.0) or 10.0)
     except ValueError:
         print("参数格式无效。")
         return
-
-    duration = None if duration_text in {"", "0"} else float(duration_text)
-    count = int(count_text) if count_text else None
-    if duration is None and count is None:
-        duration = 10.0
 
     try:
         run_load_test(
@@ -705,35 +802,61 @@ def _print_menu(store_path: Path, current: DeviceRecord | None) -> None:
     )
 
 
-def run_interactive(store_path: Path = DEFAULT_STORE_PATH) -> int:
+def _shutdown_bettercap_on_exit(config: Mapping[str, Any]) -> None:
+    bettercap_config = config.get("bettercap", {})
+    if not bool(bettercap_config.get("shutdown_on_ui_exit", True)):
+        return
+
+    client = BettercapClient(
+        str(bettercap_config.get("url", "http://127.0.0.1:8081")),
+        str(bettercap_config.get("username", "user")),
+        str(bettercap_config.get("password", "pass")),
+        timeout=float(bettercap_config.get("api_timeout", 3.0)),
+    )
+    try:
+        print("正在通过 Bettercap API 关闭 bettercap...", flush=True)
+        client.shutdown()
+        print("bettercap 已请求关闭。", flush=True)
+    except BettercapAPIError as exc:
+        print(f"关闭 bettercap 失败：{exc}", flush=True)
+
+
+def run_interactive(
+    store_path: Path = DEFAULT_STORE_PATH,
+    config: Mapping[str, Any] | None = None,
+) -> int:
     """Run the interactive command-line UI."""
 
+    config = config or ensure_config()
     current: DeviceRecord | None = None
 
-    while True:
-        _clear_screen()
-        _print_menu(store_path, current)
-        choice = _ask("输入编号", "1")
-        _clear_screen()
+    try:
+        while True:
+            _clear_screen()
+            _print_menu(store_path, current)
+            choice = _ask("输入编号", "1")
+            _clear_screen()
 
-        if choice == "1":
-            current = _locate_flow(store_path, current)
-            _pause()
-        elif choice == "2":
-            selected = _scan_network_flow(store_path)
-            if selected is not None:
-                current = selected
-            _pause()
-        elif choice == "3":
-            current = _mdns_flow(store_path, current)
-            _pause()
-        elif choice == "4":
-            current = _saved_devices_flow(store_path, current)
-        elif choice == "5":
-            _load_test_flow(current)
-            _pause()
-        elif choice == "6":
-            return 0
-        else:
-            print("未知选项，请重新输入。")
-            _pause()
+            if choice == "1":
+                current = _locate_flow(store_path, current)
+                _pause()
+            elif choice == "2":
+                selected = _scan_network_flow(store_path, config)
+                if selected is not None:
+                    current = selected
+                _pause()
+            elif choice == "3":
+                current = _mdns_flow(store_path, current)
+                _pause()
+            elif choice == "4":
+                current = _saved_devices_flow(store_path, current)
+            elif choice == "5":
+                _load_test_flow(current, config)
+                _pause()
+            elif choice == "6":
+                return 0
+            else:
+                print("未知选项，请重新输入。")
+                _pause()
+    finally:
+        _shutdown_bettercap_on_exit(config)
