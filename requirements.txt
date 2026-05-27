@@ -1,0 +1,5 @@
+# Runtime dependency
+scapy
+
+# Tooling dependency currently declared by pyproject.toml
+ruff
