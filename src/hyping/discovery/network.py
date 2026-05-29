@@ -1,7 +1,11 @@
 import ipaddress
+import os
 import re
+import select
 import socket
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -15,13 +19,13 @@ class LocalNetworkInfo:
     ipv4_network: str | None = None
 
 
-def _run(command: list[str]) -> str:
+def _run(command: list[str], *, timeout: float = 1.0) -> str:
     result = subprocess.run(
         command,
         check=False,
         capture_output=True,
         text=True,
-        timeout=1.0,
+        timeout=timeout,
     )
     return f"{result.stdout}\n{result.stderr}"
 
@@ -70,8 +74,108 @@ def _macos_hardware_ports() -> dict[str, str]:
     return ports
 
 
+def _ssid_from_system_profiler(output: str) -> str | None:
+    """Extract the current Wi-Fi SSID from ``system_profiler SPAirPortDataType``.
+
+    macOS has made some older Wi-Fi SSID commands unreliable or redacted on
+    recent releases. The current network is still exposed in system_profiler as
+    the first item after ``Current Network Information:``, e.g.::
+
+        Current Network Information:
+            My Wi-Fi Name:
+                PHY Mode: 802.11ax
+
+    This mirrors the common shell approach using ``system_profiler`` and
+    taking the first colon-delimited field after ``Current Network Information``.
+    """
+
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        if "Current Network Information:" not in line:
+            continue
+
+        for candidate in lines[index + 1 :]:
+            stripped = candidate.strip()
+            if not stripped:
+                continue
+            ssid = stripped.split(":", 1)[0].strip()
+            return ssid or None
+
+    return None
+
+
+def _ssid_from_system_profiler_live(timeout: float = 5.0) -> str | None:
+    """Stream ``system_profiler`` and return the SSID as soon as it appears."""
+
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            ["system_profiler", "SPAirPortDataType"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+        if process.stdout is None:
+            return None
+
+        fd = process.stdout.fileno()
+        os.set_blocking(fd, False)
+        deadline = time.monotonic() + timeout
+        after_current_network = False
+        pending = b""
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                return None
+
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                if pending:
+                    lines = [pending]
+                    pending = b""
+                else:
+                    return None
+            else:
+                pending += chunk
+                *lines, pending = pending.split(b"\n")
+
+            for raw_line in lines:
+                line = raw_line.decode(errors="replace")
+                if after_current_network:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    ssid = stripped.split(":", 1)[0].strip()
+                    return ssid or None
+
+                if "Current Network Information:" in line:
+                    after_current_network = True
+
+            if not chunk and process.poll() is not None:
+                return None
+    except (FileNotFoundError, subprocess.SubprocessError, OSError, ValueError):
+        return None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def _wifi_ssid(interface: str) -> str | None:
     """Return the connected Wi-Fi SSID on macOS when available."""
+
+    ssid = _ssid_from_system_profiler_live(timeout=5.0)
+    if ssid is not None:
+        return ssid
 
     commands = (
         ["networksetup", "-getairportnetwork", interface],
@@ -163,7 +267,9 @@ def detect_local_ipv4_network() -> str | None:
     return _fallback_local_ip_network()
 
 
-def detect_local_network_info() -> LocalNetworkInfo:
+def detect_local_network_info(
+    on_reading_ssid: Callable[[], None] | None = None,
+) -> LocalNetworkInfo:
     """Detect the current interface, connection type, SSID and IPv4 subnet."""
 
     interface = _default_interface()
@@ -174,6 +280,8 @@ def detect_local_network_info() -> LocalNetworkInfo:
     if interface is not None:
         hardware_port = _macos_hardware_ports().get(interface)
         if hardware_port and "wi-fi" in hardware_port.casefold():
+            if on_reading_ssid is not None:
+                on_reading_ssid()
             ssid = _wifi_ssid(interface)
         network = _network_from_ifconfig(interface)
 

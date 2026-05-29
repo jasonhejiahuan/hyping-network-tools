@@ -1,11 +1,15 @@
 import math
+import os
 import re
+import select
 import shutil
 import socket
 import subprocess
 import sys
+import termios
 import threading
 import time
+import tty
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -13,6 +17,36 @@ from typing import Literal
 
 ProbeProtocol = Literal["icmp", "tcp"]
 _PING_TIME_RE = re.compile(r"time[=<]([0-9.]+)\s*ms")
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "1"
+ANSI_DIM = "2"
+ANSI_ORANGE = "38;5;166"
+ANSI_CYAN = "38;5;31"
+ANSI_TEAL = "38;5;37"
+ANSI_GREEN = "38;5;35"
+ANSI_RED = "38;5;160"
+ANSI_MUTED = "38;5;245"
+
+
+def _supports_color() -> bool:
+    return (
+        sys.stdout.isatty()
+        and sys.stdout.encoding is not None
+        and sys.platform != "win32"
+        and "NO_COLOR" not in os.environ
+        and os.environ.get("TERM", "dumb") != "dumb"
+    )
+
+
+def _style(text: object, *codes: str) -> str:
+    value = str(text)
+    if not codes or not _supports_color():
+        return value
+    return f"\033[{';'.join(codes)}m{value}{ANSI_RESET}"
+
+
+def _muted(text: object) -> str:
+    return _style(text, ANSI_MUTED)
 
 
 @dataclass(slots=True, frozen=True)
@@ -97,7 +131,7 @@ class LoadTestStats:
         with self.lock:
             self.finished_at = time.perf_counter()
 
-    def snapshot(self) -> dict[str, float | int | None]:
+    def snapshot(self, *, include_series: bool = False) -> dict[str, object]:
         with self.lock:
             now = self.finished_at or time.perf_counter()
             elapsed = max(now - self.started_at, 0.000001)
@@ -110,7 +144,7 @@ class LoadTestStats:
             p95_latency = _percentile(recent, 95) if recent else None
             rate = self.completed / elapsed
             bandwidth = self.bytes_sent / elapsed
-            return {
+            summary: dict[str, object] = {
                 "elapsed": elapsed,
                 "issued": self.issued,
                 "completed": self.completed,
@@ -144,6 +178,15 @@ class LoadTestStats:
                 "max_latency_ms": self.max_latency_ms,
                 "recent_p95_latency_ms": p95_latency,
             }
+            if include_series:
+                summary.update(
+                    {
+                        "recent_rates": recent_rates,
+                        "recent_bandwidths_Bps": recent_bandwidths,
+                        "recent_latencies_ms": recent,
+                    }
+                )
+            return summary
 
 
 def _percentile(values: list[float], percentile: int) -> float:
@@ -191,6 +234,89 @@ def _progress_bar(done: int, total: int | None, *, width: int) -> str:
     ratio = min(1.0, done / total)
     filled = round(width * ratio)
     return f"{'█' * filled}{'░' * (width - filled)} {ratio * 100:5.1f}%"
+
+
+def _sample_values(values: list[float], width: int) -> list[float]:
+    if width <= 0 or not values:
+        return []
+    if len(values) <= width:
+        return values
+
+    sampled: list[float] = []
+    step = len(values) / width
+    for index in range(width):
+        start = int(index * step)
+        end = max(start + 1, int((index + 1) * step))
+        bucket = values[start:end]
+        sampled.append(sum(bucket) / len(bucket))
+    return sampled
+
+
+def _sparkline(values: list[float], width: int) -> str:
+    samples = _sample_values(values, width)
+    if not samples:
+        return "·" * max(1, min(width, 12))
+
+    low = min(samples)
+    high = max(samples)
+    blocks = "▁▂▃▄▅▆▇█"
+    if high <= low:
+        return blocks[0] * len(samples)
+
+    return "".join(
+        blocks[min(len(blocks) - 1, int((value - low) / (high - low) * 7))]
+        for value in samples
+    )
+
+
+def _area_chart(values: list[float], width: int, *, height: int = 4) -> list[str]:
+    samples = _sample_values(values, width)
+    if not samples:
+        return [_muted("尚无足够样本，测试开始后会实时绘制趋势。")]
+
+    low = min(samples)
+    high = max(samples)
+    if high <= low:
+        high = low + 1
+
+    lines: list[str] = []
+    for row in range(height, 0, -1):
+        threshold = low + (high - low) * row / height
+        line = "".join("█" if value >= threshold else " " for value in samples)
+        lines.append(line.rstrip() or " ")
+    return lines
+
+
+def _float_series(value: object) -> list[float]:
+    if not isinstance(value, list):
+        return []
+    series: list[float] = []
+    for item in value:
+        try:
+            series.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return series
+
+
+def _print_chart(
+    title: str,
+    values: list[float],
+    *,
+    width: int,
+    color: str,
+    formatter,
+) -> None:
+    if values:
+        latest = formatter(values[-1])
+        peak = formatter(max(values))
+        header = f"{title:<8} {_sparkline(values, width)}  now {latest} · peak {peak}"
+    else:
+        header = f"{title:<8} {'·' * min(width, 24)}"
+
+    print(_style(header, color, ANSI_BOLD))
+    for line in _area_chart(values, width):
+        print(_style(f"  {line}", color, ANSI_DIM))
 
 
 def _ping_args(target: str, timeout: float, payload_size: int) -> list[str]:
@@ -393,26 +519,59 @@ def _worker(
         )
 
 
+class _LiveKeyboard:
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled and sys.stdin.isatty()
+        self.fd: int | None = None
+        self.previous: list[object] | None = None
+
+    def __enter__(self) -> "_LiveKeyboard":
+        if not self.enabled:
+            return self
+        try:
+            self.fd = sys.stdin.fileno()
+            self.previous = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+        except (termios.error, OSError):
+            self.enabled = False
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.enabled and self.fd is not None and self.previous is not None:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.previous)
+
+    def escape_pressed(self) -> bool:
+        if not self.enabled or self.fd is None:
+            return False
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if not ready:
+                return False
+            return sys.stdin.read(1) == "\x1b"
+        except (OSError, ValueError):
+            return False
+
+
 def _render(config: LoadTestConfig, stats: LoadTestStats) -> None:
     width = _terminal_width()
-    snap = stats.snapshot()
+    snap = stats.snapshot(include_series=True)
     target = f"{config.protocol}://{config.target}"
     if config.protocol == "tcp":
         target = f"{target}:{config.tcp_port}"
 
     print("\033[2J\033[H", end="")
-    print("Hyping 并发负载测试")
-    print("─" * min(width, 100))
-    print(f"目标: {target}")
+    print(_style("Hyping 并发负载测试", ANSI_ORANGE, ANSI_BOLD))
+    print(_muted("─" * min(width, 100)))
+    print(f"{_muted('目标:')} {_style(target, ANSI_CYAN, ANSI_BOLD)}")
     print(
-        f"并发: {config.concurrency}  "
-        f"超时: {config.timeout}s  "
-        f"负载: {_format_bytes(config.payload_size)}  "
-        f"渐进启动: {config.ramp_up}s  "
-        f"模式: {'包数' if config.count else '时长'}"
+        f"{_muted('并发:')} {_style(config.concurrency, ANSI_ORANGE, ANSI_BOLD)}  "
+        f"{_muted('超时:')} {config.timeout}s  "
+        f"{_muted('负载:')} {_format_bytes(config.payload_size)}  "
+        f"{_muted('渐进启动:')} {config.ramp_up}s  "
+        f"{_muted('模式:')} {'包数' if config.count else '时长'}"
     )
     if config.tcp_keep_open:
-        print("TCP 模式: 保持连接并持续发送")
+        print(_style("TCP 模式: 保持连接并持续发送", ANSI_TEAL, ANSI_BOLD))
     if config.duration is not None:
         print(f"时长: {config.duration}s")
     if config.count is not None:
@@ -428,10 +587,10 @@ def _render(config: LoadTestConfig, stats: LoadTestStats) -> None:
     print()
     print(f"已运行: {float(snap['elapsed']):.1f}s")
     print(
-        f"完成: {snap['completed']}  "
-        f"成功: {snap['succeeded']}  "
-        f"失败: {snap['failed']}  "
-        f"进行中: {snap['in_flight']}"
+        f"{_muted('完成:')} {snap['completed']}  "
+        f"{_muted('成功:')} {_style(snap['succeeded'], ANSI_GREEN, ANSI_BOLD)}  "
+        f"{_muted('失败:')} {_style(snap['failed'], ANSI_RED, ANSI_BOLD)}  "
+        f"{_muted('进行中:')} {snap['in_flight']}"
     )
     success_rate = (
         f"{float(snap['success_rate']) * 100:.1f}%"
@@ -465,7 +624,31 @@ def _render(config: LoadTestConfig, stats: LoadTestStats) -> None:
         f"{_format_ms(snap['max_latency_ms'])} / "
         f"{_format_ms(snap['recent_p95_latency_ms'])}"
     )
-    print("\n按 Ctrl+C 停止。")
+    chart_width = min(64, max(24, width - 26))
+    print()
+    _print_chart(
+        "吞吐趋势",
+        _float_series(snap.get("recent_rates")),
+        width=chart_width,
+        color=ANSI_CYAN,
+        formatter=_format_rate,
+    )
+    _print_chart(
+        "延迟趋势",
+        _float_series(snap.get("recent_latencies_ms")),
+        width=chart_width,
+        color=ANSI_ORANGE,
+        formatter=_format_ms,
+    )
+    if int(snap["bytes_sent"] or 0) > 0:
+        _print_chart(
+            "带宽趋势",
+            _float_series(snap.get("recent_bandwidths_Bps")),
+            width=chart_width,
+            color=ANSI_TEAL,
+            formatter=_format_bandwidth,
+        )
+    print(_muted("\n按 Esc 或 Ctrl+C 停止。"))
 
 
 def run_load_test(config: LoadTestConfig, *, live: bool = True) -> dict[str, object]:
@@ -490,13 +673,17 @@ def run_load_test(config: LoadTestConfig, *, live: bool = True) -> dict[str, obj
                 for worker_index in range(config.concurrency)
             ]
 
-            while not stop_event.is_set():
-                if all(future.done() for future in futures):
-                    break
-                if live:
-                    _render(config, stats)
-                    stats.mark_sample()
-                time.sleep(config.refresh_interval)
+            with _LiveKeyboard(live) as keyboard:
+                while not stop_event.is_set():
+                    if all(future.done() for future in futures):
+                        break
+                    if live and keyboard.escape_pressed():
+                        stop_event.set()
+                        break
+                    if live:
+                        stats.mark_sample()
+                        _render(config, stats)
+                    time.sleep(config.refresh_interval)
     except KeyboardInterrupt:
         stop_event.set()
     finally:

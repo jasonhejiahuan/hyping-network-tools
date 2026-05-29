@@ -441,6 +441,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.bettercap_pass,
                     timeout=args.bettercap_api_timeout,
                 )
+                if not client.is_online(timeout=0.25):
+                    parser.exit(
+                        1,
+                        f"Bettercap API is not reachable at {args.bettercap_url}\n",
+                    )
                 items = list_bettercap_hosts(
                     client,
                     wait=args.bettercap_wait,

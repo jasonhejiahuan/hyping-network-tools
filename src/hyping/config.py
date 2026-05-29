@@ -12,6 +12,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "username": "user",
         "password": "pass",
         "api_timeout": 3.0,
+        "online_check_timeout": 0.25,
         "wait": 5.0,
         "poll_interval": 0.5,
         "start_discovery": True,

@@ -210,6 +210,20 @@ class BettercapClient:
             raise BettercapAPIError(msg)
         return response
 
+    def is_online(self, *, timeout: float | None = None) -> bool:
+        """Return whether the Bettercap REST API is reachable."""
+
+        previous_timeout = self.timeout
+        if timeout is not None:
+            self.timeout = timeout
+        try:
+            self.session()
+        except BettercapAPIError:
+            return False
+        finally:
+            self.timeout = previous_timeout
+        return True
+
     def start_discovery(
         self,
         *,
@@ -263,6 +277,7 @@ def iter_bettercap_hosts(
         msg = "poll_interval must be greater than 0"
         raise ValueError(msg)
 
+    latest_hosts = client.hosts()
     if start_discovery:
         try:
             client.start_discovery(
@@ -278,7 +293,7 @@ def iter_bettercap_hosts(
     seen: set[IPv4Address] = set()
 
     while True:
-        for host in client.hosts():
+        for host in latest_hosts:
             if host.ip in seen:
                 continue
             seen.add(host.ip)
@@ -287,6 +302,7 @@ def iter_bettercap_hosts(
         if time.monotonic() >= deadline:
             break
         time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+        latest_hosts = client.hosts()
 
 
 def list_bettercap_hosts(

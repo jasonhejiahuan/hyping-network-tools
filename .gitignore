@@ -5,6 +5,7 @@ __pycache__/
 .venv-ft/
 
 .vscode/
+.lh/
 
 *.egg-info/
 

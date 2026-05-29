@@ -2,7 +2,9 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+import termios
+import tty
+from collections.abc import Callable, Mapping
 from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from hyping.discovery.mdns import (
     merge_mdns_services,
 )
 from hyping.discovery.network import (
+    LocalNetworkInfo,
     detect_local_ipv4_network,
     detect_local_network_info,
 )
@@ -39,6 +42,49 @@ from hyping.storage import (
 )
 
 MIN_TERMINAL_WIDTH = 72
+FAST_API_CHECK_TIMEOUT = 0.25
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "1"
+ANSI_DIM = "2"
+ANSI_ORANGE = "38;5;166"
+ANSI_CYAN = "38;5;31"
+ANSI_TEAL = "38;5;37"
+ANSI_GREEN = "38;5;35"
+ANSI_RED = "38;5;160"
+ANSI_MUTED = "38;5;245"
+
+_NETWORK_INFO_CACHE: LocalNetworkInfo | None = None
+
+
+class BackRequested(Exception):
+    """Raised when the user presses Esc to return to the previous screen."""
+
+
+def _supports_color() -> bool:
+    return (
+        sys.stdout.isatty()
+        and os.environ.get("TERM", "dumb") != "dumb"
+        and "NO_COLOR" not in os.environ
+    )
+
+
+def _style(text: object, *codes: str) -> str:
+    value = str(text)
+    if not codes or not _supports_color():
+        return value
+    return f"\033[{';'.join(codes)}m{value}{ANSI_RESET}"
+
+
+def _muted(text: object) -> str:
+    return _style(text, ANSI_MUTED)
+
+
+def _accent(text: object) -> str:
+    return _style(text, ANSI_ORANGE, ANSI_BOLD)
+
+
+def _cyan(text: object) -> str:
+    return _style(text, ANSI_CYAN, ANSI_BOLD)
 
 
 def _terminal_width() -> int:
@@ -60,30 +106,77 @@ def _clear_screen() -> None:
     if not sys.stdout.isatty():
         return
 
-    command = "cls" if os.name == "nt" else "clear"
-    os.system(command)
+    print("\033[2J\033[H", end="", flush=True)
+
+
+def _read_line_interactive(prompt: str) -> str:
+    """Read a line while allowing Esc to return immediately on TTYs."""
+
+    if not sys.stdin.isatty():
+        return input(prompt)
+
+    fd = sys.stdin.fileno()
+    previous = termios.tcgetattr(fd)
+    buffer: list[str] = []
+    print(prompt, end="", flush=True)
+    try:
+        tty.setraw(fd)
+        while True:
+            char = sys.stdin.read(1)
+            if char in {"\r", "\n"}:
+                print()
+                return "".join(buffer)
+            if char == "\x1b":
+                print()
+                raise BackRequested
+            if char == "\x03":
+                raise KeyboardInterrupt
+            if char == "\x04":
+                raise EOFError
+            if char in {"\x7f", "\b"}:
+                if buffer:
+                    buffer.pop()
+                    print("\b \b", end="", flush=True)
+                continue
+            if char.isprintable():
+                buffer.append(char)
+                print(char, end="", flush=True)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, previous)
 
 
 def _pause() -> None:
-    if sys.stdin.isatty():
-        input("\n按 Enter 返回菜单...")
+    if not sys.stdin.isatty():
+        return
+
+    try:
+        _read_line_interactive(_muted("\n按 Enter 继续 / Esc 返回上一级..."))
+    except BackRequested:
+        return
 
 
 def _title(text: str) -> None:
     width = _terminal_width()
-    print(text)
-    print("─" * min(width, 100))
+    line_width = min(width, 100)
+    print(_accent(text))
+    print(_muted("─" * line_width))
+
+
+def _navigation_hint() -> None:
+    print(_muted("Esc 返回上一级 · Enter 使用默认值"))
 
 
 def _ask(prompt: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default is not None else ""
-    value = input(f"{prompt}{suffix}: ").strip()
+    value = _read_line_interactive(f"{_cyan('›')} {prompt}{suffix}: ").strip()
     return default if not value and default is not None else value
 
 
 def _yes(prompt: str, *, default: bool = True) -> bool:
     default_text = "Y/n" if default else "y/N"
-    value = input(f"{prompt} [{default_text}]: ").strip().casefold()
+    value = _read_line_interactive(
+        f"{_cyan('›')} {prompt} [{default_text}]: "
+    ).strip().casefold()
     if not value:
         return default
 
@@ -267,18 +360,29 @@ def _located_devices_action_flow(
             "  4. 查看一台设备详情\n"
             "  5. 返回"
         )
-        choice = _ask("输入编号", "1")
+        try:
+            choice = _ask("输入编号", "1")
+        except BackRequested:
+            return current
         _clear_screen()
 
         if choice == "1":
-            selected = _choose_record(records, "输入要设为当前设备的编号")
+            try:
+                selected = _choose_record(records, "输入要设为当前设备的编号")
+            except BackRequested:
+                _clear_screen()
+                continue
             if selected is not None:
                 current = selected
                 print(f"已设为当前设备：{_record_title(selected)}")
             _pause()
             _clear_screen()
         elif choice == "2":
-            selected = _choose_record(records, "输入要保存的编号")
+            try:
+                selected = _choose_record(records, "输入要保存的编号")
+            except BackRequested:
+                _clear_screen()
+                continue
             if selected is not None:
                 _save_record(store_path, selected)
             _pause()
@@ -289,7 +393,11 @@ def _located_devices_action_flow(
             _pause()
             _clear_screen()
         elif choice == "4":
-            selected = _choose_record(records, "输入要查看详情的编号")
+            try:
+                selected = _choose_record(records, "输入要查看详情的编号")
+            except BackRequested:
+                _clear_screen()
+                continue
             if selected is not None:
                 print(json.dumps(selected, ensure_ascii=False, indent=2))
             _pause()
@@ -323,6 +431,9 @@ def _scan_network_flow(
     api_user = str(bettercap_config.get("username", "user"))
     api_pass = str(bettercap_config.get("password", "pass"))
     api_timeout = float(bettercap_config.get("api_timeout", 3.0))
+    online_check_timeout = float(
+        bettercap_config.get("online_check_timeout", FAST_API_CHECK_TIMEOUT)
+    )
     wait = float(bettercap_config.get("wait", 5.0))
     poll_interval = float(bettercap_config.get("poll_interval", 0.5))
     start_discovery = bool(bettercap_config.get("start_discovery", True))
@@ -335,6 +446,7 @@ def _scan_network_flow(
             print(f"Bettercap API 地址: {api_url}")
             print(f"Bettercap 用户名: {api_user}")
             print(f"API 超时时间秒: {api_timeout}")
+            print(f"API 在线检查超时时间秒: {online_check_timeout}")
             print(f"持续读取 Bettercap 秒数: {wait}")
             print(f"刷新间隔秒: {poll_interval}")
             print(f"自动启动 net.recon/net.probe: {'是' if start_discovery else '否'}")
@@ -361,6 +473,9 @@ def _scan_network_flow(
                 api_user = _ask("Bettercap 用户名", api_user)
                 api_pass = _ask("Bettercap 密码", api_pass)
                 api_timeout = float(_ask("API 超时时间秒", str(api_timeout)))
+                online_check_timeout = float(
+                    _ask("API 在线检查超时时间秒", str(online_check_timeout))
+                )
                 wait = float(_ask("持续读取 Bettercap 秒数", str(wait)))
                 poll_interval = float(_ask("刷新间隔秒", str(poll_interval)))
                 start_discovery = _yes(
@@ -418,6 +533,10 @@ def _scan_network_flow(
                 api_pass,
                 timeout=api_timeout,
             )
+            if not client.is_online(timeout=online_check_timeout):
+                print(f"Bettercap API 未在线：{api_url}")
+                print("请先启动 Bettercap REST API，或改用内置 ARP 扫描。")
+                return None
             devices = list_bettercap_hosts(
                 client,
                 wait=wait,
@@ -632,25 +751,171 @@ def _saved_devices_flow(
             "  3. 删除已保存设备\n"
             "  4. 返回主菜单"
         )
-        choice = _ask("输入编号", "1")
+        try:
+            choice = _ask("输入编号", "1")
+        except BackRequested:
+            return current
         _clear_screen()
 
-        if choice == "1":
-            _title("查看已保存设备")
-            _show_records(load_device_records(store_path))
-            _pause()
-        elif choice == "2":
-            selected = _select_saved_flow(store_path)
-            if selected is not None:
-                current = selected
-            _pause()
-        elif choice == "3":
-            _delete_flow(store_path)
-            _pause()
-        elif choice == "4":
-            return current
-        else:
-            print("未知选项，请重新输入。")
+        try:
+            if choice == "1":
+                _title("查看已保存设备")
+                _show_records(load_device_records(store_path))
+                _pause()
+            elif choice == "2":
+                selected = _select_saved_flow(store_path)
+                if selected is not None:
+                    current = selected
+                _pause()
+            elif choice == "3":
+                _delete_flow(store_path)
+                _pause()
+            elif choice == "4":
+                return current
+            else:
+                print("未知选项，请重新输入。")
+                _pause()
+        except BackRequested:
+            continue
+
+
+def _bool_text(value: bool) -> str:
+    return "是" if value else "否"
+
+
+def _load_param_rows(params: dict[str, Any]) -> list[tuple[str, str, object, bool]]:
+    protocol = str(params["protocol"])
+    tcp_enabled = protocol == "tcp"
+    return [
+        ("1", "目标", params["target"], True),
+        ("2", "协议", protocol, True),
+        ("3", "TCP 端口", params["port"] or "-", tcp_enabled),
+        (
+            "4",
+            "保持连接持续发送",
+            _bool_text(bool(params["tcp_keep_open"])),
+            tcp_enabled,
+        ),
+        ("5", "并发线程数", params["concurrency"], True),
+        (
+            "6",
+            "持续时间秒",
+            "按总请求/包数" if params["duration"] is None else params["duration"],
+            True,
+        ),
+        (
+            "7",
+            "总请求/包数",
+            "按持续时间" if params["count"] is None else params["count"],
+            True,
+        ),
+        ("8", "单次超时时间秒", params["timeout"], True),
+        ("9", "每次发送负载字节数", params["payload_size"], True),
+        ("10", "渐进启动秒数", params["ramp_up"], True),
+        ("11", "线程错峰抖动秒数", params["jitter"], True),
+    ]
+
+
+def _print_load_test_params(params: dict[str, Any], *, numbered: bool = False) -> None:
+    print(_accent("将使用这些参数"))
+    for number, label, value, enabled in _load_param_rows(params):
+        prefix = f"{number:>2}. " if numbered else ""
+        label_text = _style(f"{label:<18}", ANSI_MUTED if enabled else ANSI_DIM)
+        value_text = _style(
+            value,
+            ANSI_ORANGE if enabled else ANSI_MUTED,
+            ANSI_BOLD if enabled else ANSI_DIM,
+        )
+        print(f"{prefix}{label_text} {_muted('│')} {value_text}")
+
+
+def _require_tcp(params: dict[str, Any]) -> bool:
+    if params["protocol"] == "tcp":
+        return True
+    print("该参数仅在 TCP 协议下可用。")
+    _pause()
+    return False
+
+
+def _edit_load_test_params(params: dict[str, Any]) -> None:
+    """Let the user edit one load-test parameter at a time."""
+
+    while True:
+        _clear_screen()
+        _title("调整负载测试参数")
+        _print_load_test_params(params, numbered=True)
+        print(_muted("\n输入编号只修改该项；0 或 Enter 开始测试；Esc 返回上一级。"))
+        choice = _ask("要修改的参数编号", "0").casefold()
+        if choice in {"", "0", "done", "完成"}:
+            if params["duration"] is None and params["count"] is None:
+                print("持续时间和总请求/包数不能同时为空。")
+                _pause()
+                continue
+            return
+
+        try:
+            if choice == "1":
+                value = _ask("目标 IP 或 hostname", str(params["target"]))
+                if not value:
+                    print("目标不能为空。")
+                    _pause()
+                    continue
+                params["target"] = value
+            elif choice == "2":
+                protocol = _ask("协议 icmp/tcp", str(params["protocol"])).casefold()
+                if protocol not in {"icmp", "tcp"}:
+                    print("协议只能是 icmp 或 tcp。")
+                    _pause()
+                    continue
+                params["protocol"] = protocol
+                if protocol == "tcp" and params["port"] is None:
+                    params["port"] = 5000
+                if protocol == "icmp":
+                    params["tcp_keep_open"] = False
+            elif choice == "3":
+                if not _require_tcp(params):
+                    continue
+                params["port"] = int(_ask("TCP 端口", str(params["port"] or 5000)))
+            elif choice == "4":
+                if not _require_tcp(params):
+                    continue
+                params["tcp_keep_open"] = _yes(
+                    "是否保持 TCP 连接并持续发送",
+                    default=bool(params["tcp_keep_open"]),
+                )
+            elif choice == "5":
+                params["concurrency"] = int(
+                    _ask("并发线程数", str(params["concurrency"]))
+                )
+            elif choice == "6":
+                current = "" if params["duration"] is None else str(params["duration"])
+                value = _ask("持续时间秒；输入 0/留空则按总数量", current)
+                params["duration"] = None if value in {"", "0"} else float(value)
+            elif choice == "7":
+                current = "" if params["count"] is None else str(params["count"])
+                value = _ask("总请求/包数；留空则按持续时间", current)
+                params["count"] = None if not value else int(value)
+            elif choice == "8":
+                params["timeout"] = float(
+                    _ask("单次超时时间秒", str(params["timeout"]))
+                )
+            elif choice == "9":
+                params["payload_size"] = int(
+                    _ask("每次发送负载字节数；0 表示默认", str(params["payload_size"]))
+                )
+            elif choice == "10":
+                params["ramp_up"] = float(
+                    _ask("渐进启动秒数；0 表示同时启动", str(params["ramp_up"]))
+                )
+            elif choice == "11":
+                params["jitter"] = float(
+                    _ask("线程错峰抖动秒数", str(params["jitter"]))
+                )
+            else:
+                print("未知参数编号。")
+                _pause()
+        except ValueError:
+            print("参数格式无效。")
             _pause()
 
 
@@ -677,56 +942,32 @@ def _load_test_flow(
         print("协议只能是 icmp 或 tcp。")
         return
 
-    port: int | None = (
-        int(load_config.get("tcp_port", 5000))
-        if protocol == "tcp"
-        else None
-    )
-    concurrency = int(load_config.get("concurrency", 32))
+    params: dict[str, Any] = {
+        "target": target,
+        "protocol": protocol,
+        "port": (
+            int(load_config.get("tcp_port", 5000))
+            if protocol == "tcp"
+            else None
+        ),
+        "concurrency": int(load_config.get("concurrency", 32)),
+    }
     duration_value = load_config.get("duration", 10.0)
-    duration: float | None = None if duration_value is None else float(duration_value)
+    params["duration"] = None if duration_value is None else float(duration_value)
     count_value = load_config.get("count")
-    count: int | None = None if count_value is None else int(count_value)
-    timeout = float(load_config.get("timeout", 1.0))
-    payload_size = int(load_config.get("payload_size", 0))
-    tcp_keep_open = bool(load_config.get("tcp_keep_open", False))
-    ramp_up = float(load_config.get("ramp_up", 0.75))
-    jitter = float(load_config.get("per_worker_jitter", 0.002))
+    params["count"] = None if count_value is None else int(count_value)
+    params["timeout"] = float(load_config.get("timeout", 1.0))
+    params["payload_size"] = int(load_config.get("payload_size", 0))
+    params["tcp_keep_open"] = bool(load_config.get("tcp_keep_open", False))
+    params["ramp_up"] = float(load_config.get("ramp_up", 0.75))
+    params["jitter"] = float(load_config.get("per_worker_jitter", 0.002))
 
     try:
-        print("\n将使用这些参数：")
-        print(f"目标: {target}")
-        print(f"协议: {protocol}")
-        if protocol == "tcp":
-            print(f"TCP 端口: {port}")
-            print(f"保持连接持续发送: {'是' if tcp_keep_open else '否'}")
-        print(f"并发线程数: {concurrency}")
-        print(f"持续时间秒: {duration}")
-        print(f"总请求/包数: {'按持续时间' if count is None else count}")
-        print(f"单次超时时间秒: {timeout}")
-        print(f"每次发送负载字节数: {payload_size}")
-        print(f"渐进启动秒数: {ramp_up}")
-        print(f"线程错峰抖动秒数: {jitter}")
+        print()
+        _print_load_test_params(params)
 
         if _yes("是否修改参数", default=False):
-            if protocol == "tcp":
-                port = int(_ask("TCP 端口", str(port)))
-                tcp_keep_open = _yes(
-                    "是否保持 TCP 连接并持续发送",
-                    default=tcp_keep_open,
-                )
-            concurrency = int(_ask("并发线程数", str(concurrency)))
-            duration_text = _ask("持续时间秒；输入 0 则仅按总数量", str(duration))
-            count_text = _ask("总请求/包数；留空则按持续时间")
-            timeout = float(_ask("单次超时时间秒", str(timeout)))
-            payload_size = int(_ask("每次发送负载字节数；0 表示默认", "0"))
-            ramp_up = float(_ask("渐进启动秒数；0 表示同时启动", str(ramp_up)))
-            jitter = float(_ask("线程错峰抖动秒数", str(jitter)))
-
-            duration = None if duration_text in {"", "0"} else float(duration_text)
-            count = int(count_text) if count_text else None
-            if duration is None and count is None:
-                duration = float(load_config.get("duration", 10.0) or 10.0)
+            _edit_load_test_params(params)
     except ValueError:
         print("参数格式无效。")
         return
@@ -734,17 +975,17 @@ def _load_test_flow(
     try:
         run_load_test(
             LoadTestConfig(
-                target=target,
-                protocol=protocol,  # type: ignore[arg-type]
-                concurrency=concurrency,
-                duration=duration,
-                count=count,
-                timeout=timeout,
-                tcp_port=port,
-                ramp_up=ramp_up,
-                per_worker_jitter=jitter,
-                payload_size=payload_size,
-                tcp_keep_open=tcp_keep_open,
+                target=str(params["target"]),
+                protocol=params["protocol"],  # type: ignore[arg-type]
+                concurrency=int(params["concurrency"]),
+                duration=params["duration"],
+                count=params["count"],
+                timeout=float(params["timeout"]),
+                tcp_port=params["port"],
+                ramp_up=float(params["ramp_up"]),
+                per_worker_jitter=float(params["jitter"]),
+                payload_size=int(params["payload_size"]),
+                tcp_keep_open=bool(params["tcp_keep_open"]),
             )
         )
     except ValueError as exc:
@@ -760,36 +1001,84 @@ def _is_elevated() -> bool:
         return False
 
 
-def _format_network_status() -> str:
-    info = detect_local_network_info()
+def _get_network_info(
+    *,
+    refresh: bool = False,
+    on_reading_ssid: Callable[[], None] | None = None,
+) -> LocalNetworkInfo:
+    global _NETWORK_INFO_CACHE
+
+    if refresh or _NETWORK_INFO_CACHE is None:
+        _NETWORK_INFO_CACHE = detect_local_network_info(
+            on_reading_ssid=on_reading_ssid
+        )
+
+    return _NETWORK_INFO_CACHE
+
+
+def _format_status_part(label: str, value: object, *, color: str = ANSI_CYAN) -> str:
+    return f"{_muted(label + ':')} {_style(value, color, ANSI_BOLD)}"
+
+
+def _format_network_status(
+    *,
+    refresh: bool = False,
+    on_reading_ssid: Callable[[], None] | None = None,
+) -> str:
+    info = _get_network_info(
+        refresh=refresh,
+        on_reading_ssid=on_reading_ssid,
+    )
     parts: list[str] = []
 
     if info.hardware_port:
-        parts.append(info.hardware_port)
+        parts.append(_style(info.hardware_port, ANSI_CYAN, ANSI_BOLD))
     elif info.interface:
-        parts.append(info.interface)
+        parts.append(_style(info.interface, ANSI_CYAN, ANSI_BOLD))
     else:
-        parts.append("未知网络")
+        parts.append(_style("未知网络", ANSI_RED, ANSI_BOLD))
 
     is_wifi = bool(info.hardware_port and "wi-fi" in info.hardware_port.casefold())
     if info.ssid:
-        parts.append(f"SSID: {info.ssid}")
+        parts.append(_format_status_part("SSID", info.ssid, color=ANSI_ORANGE))
     elif is_wifi:
-        parts.append("SSID: 未获取")
+        parts.append(_format_status_part("SSID", "未获取", color=ANSI_RED))
     if info.interface and info.hardware_port:
-        parts.append(f"接口: {info.interface}")
+        parts.append(_format_status_part("接口", info.interface, color=ANSI_TEAL))
     if info.ipv4_network:
-        parts.append(f"网段: {info.ipv4_network}")
+        parts.append(_format_status_part("网段", info.ipv4_network, color=ANSI_GREEN))
 
-    return "当前网络：" + " | ".join(parts)
+    separator = _muted(" | ")
+    return f"{_accent('当前网络')} {separator.join(parts)}"
 
 
-def _print_menu(store_path: Path, current: DeviceRecord | None) -> None:
+def _print_menu(
+    store_path: Path,
+    current: DeviceRecord | None,
+    *,
+    refresh_network: bool = False,
+) -> None:
     _title("Hyping 交互式网络设备工具")
-    print(f"设备保存文件：{store_path}")
+    reading_ssid = False
+
+    def on_reading_ssid() -> None:
+        nonlocal reading_ssid
+        reading_ssid = True
+        print(_muted("正在读取 Wi-Fi SSID..."), flush=True)
+
+    network_status = _format_network_status(
+        refresh=refresh_network,
+        on_reading_ssid=on_reading_ssid,
+    )
+    if reading_ssid:
+        _clear_screen()
+        _title("Hyping 交互式网络设备工具")
+
+    print(network_status)
+    _navigation_hint()
+    print(_format_status_part("设备保存文件", store_path, color=ANSI_TEAL))
     if _is_elevated():
-        print("运行权限：提升权限/root")
-    print(_format_network_status())
+        print(_format_status_part("运行权限", "提升权限/root", color=ANSI_GREEN))
     print(_clip(_current_summary(current), _terminal_width()))
     print(
         "\n请选择操作：\n"
@@ -798,6 +1087,7 @@ def _print_menu(store_path: Path, current: DeviceRecord | None) -> None:
         "  3. 查询 mDNS/Bonjour 详细信息\n"
         "  4. 管理已保存设备\n"
         "  5. 并发 ping / TCP 负载测试\n"
+        "  r. 刷新当前网络\n"
         "  6. 退出"
     )
 
@@ -807,18 +1097,30 @@ def _shutdown_bettercap_on_exit(config: Mapping[str, Any]) -> None:
     if not bool(bettercap_config.get("shutdown_on_ui_exit", True)):
         return
 
+    check_timeout = float(
+        bettercap_config.get("online_check_timeout", FAST_API_CHECK_TIMEOUT)
+    )
     client = BettercapClient(
         str(bettercap_config.get("url", "http://127.0.0.1:8081")),
         str(bettercap_config.get("username", "user")),
         str(bettercap_config.get("password", "pass")),
         timeout=float(bettercap_config.get("api_timeout", 3.0)),
     )
+    if not client.is_online(timeout=check_timeout):
+        print("Bettercap API 已不可达，视为 bettercap 已关闭或未启动。", flush=True)
+        return
+
     try:
         print("正在通过 Bettercap API 关闭 bettercap...", flush=True)
         client.shutdown()
         print("bettercap 已请求关闭。", flush=True)
     except BettercapAPIError as exc:
-        print(f"关闭 bettercap 失败：{exc}", flush=True)
+        print(
+            "bettercap 关闭请求已发送后 API 不可达，视为已关闭。"
+            if "could not reach Bettercap API" in str(exc)
+            else f"关闭 bettercap 失败：{exc}",
+            flush=True,
+        )
 
 
 def run_interactive(
@@ -829,34 +1131,44 @@ def run_interactive(
 
     config = config or ensure_config()
     current: DeviceRecord | None = None
+    refresh_network = False
 
     try:
         while True:
             _clear_screen()
-            _print_menu(store_path, current)
-            choice = _ask("输入编号", "1")
+            _print_menu(store_path, current, refresh_network=refresh_network)
+            refresh_network = False
+            try:
+                choice = _ask("输入编号", "1").casefold()
+            except BackRequested:
+                return 0
             _clear_screen()
 
-            if choice == "1":
-                current = _locate_flow(store_path, current)
-                _pause()
-            elif choice == "2":
-                selected = _scan_network_flow(store_path, config)
-                if selected is not None:
-                    current = selected
-                _pause()
-            elif choice == "3":
-                current = _mdns_flow(store_path, current)
-                _pause()
-            elif choice == "4":
-                current = _saved_devices_flow(store_path, current)
-            elif choice == "5":
-                _load_test_flow(current, config)
-                _pause()
-            elif choice == "6":
-                return 0
-            else:
-                print("未知选项，请重新输入。")
-                _pause()
+            try:
+                if choice == "1":
+                    current = _locate_flow(store_path, current)
+                    _pause()
+                elif choice == "2":
+                    selected = _scan_network_flow(store_path, config)
+                    if selected is not None:
+                        current = selected
+                    _pause()
+                elif choice == "3":
+                    current = _mdns_flow(store_path, current)
+                    _pause()
+                elif choice == "4":
+                    current = _saved_devices_flow(store_path, current)
+                elif choice == "5":
+                    _load_test_flow(current, config)
+                    _pause()
+                elif choice == "r":
+                    refresh_network = True
+                elif choice == "6":
+                    return 0
+                else:
+                    print("未知选项，请重新输入。")
+                    _pause()
+            except BackRequested:
+                continue
     finally:
         _shutdown_bettercap_on_exit(config)

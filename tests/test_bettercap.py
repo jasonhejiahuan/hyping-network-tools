@@ -3,6 +3,8 @@ from ipaddress import IPv4Address
 from unittest.mock import patch
 
 from hyping.discovery.bettercap import (
+    BettercapAPIError,
+    BettercapClient,
     BettercapHost,
     host_from_bettercap,
     hosts_from_session,
@@ -113,6 +115,36 @@ class BettercapTests(unittest.TestCase):
             [str(host.ip) for host in hosts],
             ["192.168.1.20", "192.168.1.21"],
         )
+
+    def test_client_online_check_returns_false_when_api_unreachable(self) -> None:
+        client = BettercapClient()
+
+        with patch.object(
+            client,
+            "session",
+            side_effect=BettercapAPIError("offline"),
+        ):
+            self.assertFalse(client.is_online())
+
+    def test_client_online_check_returns_true_when_session_loads(self) -> None:
+        client = BettercapClient()
+
+        with patch.object(client, "session", return_value={}):
+            self.assertTrue(client.is_online())
+
+    def test_client_online_check_uses_temporary_timeout(self) -> None:
+        client = BettercapClient(timeout=3.0)
+        observed = []
+
+        def fake_session():
+            observed.append(client.timeout)
+            return {}
+
+        with patch.object(client, "session", fake_session):
+            self.assertTrue(client.is_online(timeout=0.25))
+
+        self.assertEqual(observed, [0.25])
+        self.assertEqual(client.timeout, 3.0)
 
 
 if __name__ == "__main__":
