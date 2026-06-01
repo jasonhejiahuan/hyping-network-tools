@@ -1,7 +1,12 @@
 import base64
 import json
+import os
+import shutil
+import subprocess
+import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -11,6 +16,12 @@ from typing import Any
 
 class BettercapAPIError(RuntimeError):
     """Raised when the Bettercap REST API cannot be reached or parsed."""
+
+
+@dataclass(slots=True, frozen=True)
+class BettercapLaunch:
+    pid: int
+    command: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -259,6 +270,180 @@ class BettercapClient:
 
     def hosts(self) -> list[BettercapHost]:
         return hosts_from_session(self.session())
+
+
+def _is_elevated() -> bool:
+    if hasattr(os, "geteuid"):
+        return os.geteuid() == 0
+    try:
+        return os.getuid() == 0
+    except AttributeError:
+        return False
+
+
+def _resolve_bettercap_command(command: str) -> str | None:
+    if os.path.sep in command:
+        return command if os.access(command, os.X_OK) else None
+
+    resolved = shutil.which(command)
+    if resolved is not None:
+        return resolved
+
+    for candidate in (
+        "/opt/homebrew/bin/bettercap",
+        "/usr/local/bin/bettercap",
+        "/usr/bin/bettercap",
+    ):
+        if os.access(candidate, os.X_OK):
+            return candidate
+
+    return None
+
+
+def _api_rest_listen_target(base_url: str) -> tuple[str, int]:
+    parsed = urllib.parse.urlparse(base_url)
+    host = parsed.hostname or "127.0.0.1"
+    if host.casefold() == "localhost":
+        host = "127.0.0.1"
+
+    if host not in {"127.0.0.1", "::1", "0.0.0.0"}:
+        msg = "只能自动启动本机 Bettercap API"
+        raise BettercapAPIError(msg)
+
+    port = parsed.port or 8081
+    return host, port
+
+
+def _write_api_caplet(
+    *,
+    address: str,
+    port: int,
+    username: str,
+    password: str,
+) -> str:
+    fd, path = tempfile.mkstemp(prefix="hyping-bettercap-", suffix=".cap")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"set api.rest.address {address}\n")
+            handle.write(f"set api.rest.port {port}\n")
+            handle.write(f"set api.rest.username {username}\n")
+            handle.write(f"set api.rest.password {password}\n")
+            handle.write("api.rest on\n")
+        os.chmod(path, 0o600)
+    except OSError:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+
+    return path
+
+
+def start_bettercap_api(
+    client: BettercapClient,
+    *,
+    command: str = "bettercap",
+    interface: str | None = None,
+    startup_timeout: float = 8.0,
+    poll_interval: float = 0.25,
+    on_status: Callable[[str], None] | None = None,
+) -> BettercapLaunch:
+    if startup_timeout <= 0:
+        msg = "startup_timeout must be greater than 0"
+        raise ValueError(msg)
+    if poll_interval <= 0:
+        msg = "poll_interval must be greater than 0"
+        raise ValueError(msg)
+    if not _is_elevated():
+        msg = "自动启动 Bettercap 需要 sudo/root 权限"
+        raise BettercapAPIError(msg)
+
+    executable = _resolve_bettercap_command(command)
+    if executable is None:
+        msg = f"找不到 bettercap 命令：{command}"
+        raise BettercapAPIError(msg)
+
+    address, port = _api_rest_listen_target(client.base_url)
+    caplet_path = _write_api_caplet(
+        address=address,
+        port=port,
+        username=client.username,
+        password=client.password,
+    )
+    args = [
+        executable,
+        "-no-colors",
+        "-no-history",
+        "-silent",
+    ]
+    if interface:
+        args.extend(["-iface", interface])
+    args.extend(["-caplet", caplet_path])
+
+    if on_status is not None:
+        on_status(f"正在启动 Bettercap API：{client.base_url}")
+
+    process: subprocess.Popen[bytes] | None = None
+    ready = False
+    try:
+        process = subprocess.Popen(
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + startup_timeout
+        while time.monotonic() <= deadline:
+            if client.is_online(timeout=min(poll_interval, client.timeout)):
+                ready = True
+                return BettercapLaunch(pid=process.pid, command=executable)
+            if process.poll() is not None:
+                msg = "bettercap 启动后过早退出"
+                raise BettercapAPIError(msg)
+            time.sleep(poll_interval)
+
+        msg = f"Bettercap API 启动超时：{client.base_url}"
+        raise BettercapAPIError(msg)
+    except OSError as exc:
+        msg = f"无法启动 bettercap：{exc}"
+        raise BettercapAPIError(msg) from exc
+    finally:
+        try:
+            os.unlink(caplet_path)
+        except OSError:
+            pass
+        if process is not None and process.poll() is None and not ready:
+            process.terminate()
+
+
+def ensure_bettercap_api_online(
+    client: BettercapClient,
+    *,
+    online_check_timeout: float = 0.25,
+    auto_start: bool = True,
+    command: str = "bettercap",
+    interface: str | None = None,
+    startup_timeout: float = 8.0,
+    startup_poll_interval: float = 0.25,
+    on_status: Callable[[str], None] | None = None,
+) -> BettercapLaunch | None:
+    if client.is_online(timeout=online_check_timeout):
+        return None
+
+    if not auto_start:
+        msg = f"Bettercap API is not reachable at {client.base_url}"
+        raise BettercapAPIError(msg)
+
+    return start_bettercap_api(
+        client,
+        command=command,
+        interface=interface,
+        startup_timeout=startup_timeout,
+        poll_interval=startup_poll_interval,
+        on_status=on_status,
+    )
 
 
 def iter_bettercap_hosts(
