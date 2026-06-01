@@ -6,10 +6,13 @@ from hyping.discovery.bettercap import (
     BettercapAPIError,
     BettercapClient,
     BettercapHost,
+    BettercapLaunch,
+    ensure_bettercap_api_online,
     host_from_bettercap,
     hosts_from_session,
     iter_bettercap_hosts,
     record_from_bettercap_host,
+    start_bettercap_api,
 )
 
 
@@ -145,6 +148,75 @@ class BettercapTests(unittest.TestCase):
 
         self.assertEqual(observed, [0.25])
         self.assertEqual(client.timeout, 3.0)
+
+    def test_ensure_bettercap_api_online_does_not_start_when_online(self) -> None:
+        client = BettercapClient()
+
+        with patch.object(client, "is_online", return_value=True), patch(
+            "hyping.discovery.bettercap.start_bettercap_api"
+        ) as start:
+            launch = ensure_bettercap_api_online(client)
+
+        self.assertIsNone(launch)
+        start.assert_not_called()
+
+    def test_ensure_bettercap_api_online_starts_when_unreachable(self) -> None:
+        client = BettercapClient()
+        expected = BettercapLaunch(pid=123, command="/opt/homebrew/bin/bettercap")
+
+        with patch.object(client, "is_online", return_value=False), patch(
+            "hyping.discovery.bettercap.start_bettercap_api",
+            return_value=expected,
+        ) as start:
+            launch = ensure_bettercap_api_online(
+                client,
+                command="bettercap",
+                startup_timeout=4.0,
+                startup_poll_interval=0.2,
+            )
+
+        self.assertEqual(launch, expected)
+        start.assert_called_once()
+
+    def test_start_bettercap_api_uses_caplet_not_password_argument(self) -> None:
+        class Process:
+            pid = 321
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                raise AssertionError("ready process should not be terminated")
+
+        client = BettercapClient(password="secret")
+        popen_args = []
+
+        def fake_popen(args, **kwargs):
+            popen_args.append(args)
+            return Process()
+
+        with patch("hyping.discovery.bettercap._is_elevated", return_value=True), patch(
+            "hyping.discovery.bettercap._resolve_bettercap_command",
+            return_value="/opt/homebrew/bin/bettercap",
+        ), patch(
+            "hyping.discovery.bettercap._write_api_caplet",
+            return_value="/tmp/hyping-test.cap",
+        ), patch(
+            "hyping.discovery.bettercap.subprocess.Popen",
+            fake_popen,
+        ), patch(
+            "hyping.discovery.bettercap.os.unlink"
+        ), patch.object(
+            client,
+            "is_online",
+            return_value=True,
+        ):
+            launch = start_bettercap_api(client)
+
+        self.assertEqual(launch.pid, 321)
+        self.assertEqual(popen_args[0][0], "/opt/homebrew/bin/bettercap")
+        self.assertIn("-caplet", popen_args[0])
+        self.assertNotIn("secret", popen_args[0])
 
 
 if __name__ == "__main__":

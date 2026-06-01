@@ -1,3 +1,4 @@
+import getpass
 import json
 import os
 import shutil
@@ -14,6 +15,7 @@ from hyping.discovery.arp import can_run_active_arp_scan, list_network_devices
 from hyping.discovery.bettercap import (
     BettercapAPIError,
     BettercapClient,
+    ensure_bettercap_api_online,
     list_bettercap_hosts,
     record_from_bettercap_host,
 )
@@ -30,6 +32,15 @@ from hyping.discovery.network import (
     detect_local_network_info,
 )
 from hyping.discovery.resolver import DeviceNotFoundError, locate_devices
+from hyping.discovery.wifi import (
+    WiFiError,
+    WiFiNetwork,
+    current_wifi_ssid,
+    list_available_saved_wifi_networks,
+    list_nearby_wifi_networks,
+    list_saved_wifi_networks,
+    switch_wifi_network,
+)
 from hyping.loadtest import LoadTestConfig, run_load_test
 from hyping.models.device import Device
 from hyping.storage import (
@@ -124,10 +135,10 @@ def _read_line_interactive(prompt: str) -> str:
         while True:
             char = sys.stdin.read(1)
             if char in {"\r", "\n"}:
-                print()
+                print("\r")
                 return "".join(buffer)
             if char == "\x1b":
-                print()
+                print("\r")
                 raise BackRequested
             if char == "\x03":
                 raise KeyboardInterrupt
@@ -170,6 +181,13 @@ def _ask(prompt: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default is not None else ""
     value = _read_line_interactive(f"{_cyan('›')} {prompt}{suffix}: ").strip()
     return default if not value and default is not None else value
+
+
+def _ask_secret(prompt: str) -> str:
+    if not sys.stdin.isatty():
+        return input(f"{prompt}: ").strip()
+
+    return getpass.getpass(f"{_cyan('›')} {prompt}: ").strip()
 
 
 def _yes(prompt: str, *, default: bool = True) -> bool:
@@ -219,6 +237,27 @@ def _print_record(index: int, record: DeviceRecord) -> None:
         f"{_clip(mac, 17):<17}  "
         f"{_clip(note, note_width)}"
     )
+
+
+def _print_wifi_network(index: int, network: WiFiNetwork) -> None:
+    marker = "*" if network.current else " "
+    print(
+        f"{index:>2}{marker} "
+        f"{_clip(network.ssid, 28):<28}  "
+        f"{_clip(network.channel, 20):<20}  "
+        f"{_clip(network.security, 18):<18}  "
+        f"{_clip(network.signal_noise, 18)}"
+    )
+
+
+def _print_wifi_networks(networks: list[WiFiNetwork]) -> None:
+    print(
+        " #  SSID                          频段/信道              "
+        "安全性              信号"
+    )
+    print("─" * min(_terminal_width(), 100))
+    for index, network in enumerate(networks, start=1):
+        _print_wifi_network(index, network)
 
 
 def _show_records(records: list[DeviceRecord]) -> None:
@@ -438,6 +477,13 @@ def _scan_network_flow(
     poll_interval = float(bettercap_config.get("poll_interval", 0.5))
     start_discovery = bool(bettercap_config.get("start_discovery", True))
     discovery_warmup = float(bettercap_config.get("discovery_warmup", 3.0))
+    auto_start_api = bool(bettercap_config.get("auto_start_api", True))
+    bettercap_command = str(bettercap_config.get("command", "bettercap"))
+    bettercap_interface = str(bettercap_config.get("interface", "auto"))
+    startup_timeout = float(bettercap_config.get("startup_timeout", 8.0))
+    startup_poll_interval = float(
+        bettercap_config.get("startup_poll_interval", 0.25)
+    )
 
     try:
         print("\n将使用这些参数：")
@@ -451,6 +497,14 @@ def _scan_network_flow(
             print(f"刷新间隔秒: {poll_interval}")
             print(f"自动启动 net.recon/net.probe: {'是' if start_discovery else '否'}")
             print(f"net.recon/net.probe 预热秒数: {discovery_warmup}")
+            print(
+                "API 不在线时 sudo 自动启动 bettercap: "
+                f"{'是' if auto_start_api else '否'}"
+            )
+            print(f"bettercap 命令: {bettercap_command}")
+            print(f"bettercap 接口: {bettercap_interface}")
+            print(f"Bettercap API 启动等待秒: {startup_timeout}")
+            print(f"Bettercap API 启动轮询秒: {startup_poll_interval}")
         elif scanner == "builtin":
             print(f"扫描网段: {network}")
             print(f"每批等待秒: {timeout}")
@@ -484,6 +538,21 @@ def _scan_network_flow(
                 )
                 discovery_warmup = float(
                     _ask("net.recon/net.probe 预热秒数", str(discovery_warmup))
+                )
+                auto_start_api = _yes(
+                    "API 不在线时是否用 sudo 自动启动 bettercap",
+                    default=auto_start_api,
+                )
+                bettercap_command = _ask("bettercap 命令", bettercap_command)
+                bettercap_interface = _ask(
+                    "bettercap 接口；auto 表示自动",
+                    bettercap_interface,
+                )
+                startup_timeout = float(
+                    _ask("Bettercap API 启动等待秒", str(startup_timeout))
+                )
+                startup_poll_interval = float(
+                    _ask("Bettercap API 启动轮询秒", str(startup_poll_interval))
                 )
             else:
                 network = _ask("扫描网段；auto 表示自动检测", network)
@@ -533,10 +602,21 @@ def _scan_network_flow(
                 api_pass,
                 timeout=api_timeout,
             )
-            if not client.is_online(timeout=online_check_timeout):
-                print(f"Bettercap API 未在线：{api_url}")
-                print("请先启动 Bettercap REST API，或改用内置 ARP 扫描。")
-                return None
+            api_interface = (
+                None
+                if bettercap_interface.casefold() == "auto"
+                else bettercap_interface
+            )
+            ensure_bettercap_api_online(
+                client,
+                online_check_timeout=online_check_timeout,
+                auto_start=auto_start_api,
+                command=bettercap_command,
+                interface=api_interface,
+                startup_timeout=startup_timeout,
+                startup_poll_interval=startup_poll_interval,
+                on_status=lambda message: print(message, flush=True),
+            )
             devices = list_bettercap_hosts(
                 client,
                 wait=wait,
@@ -573,6 +653,85 @@ def _scan_network_flow(
     records = [_record_from_scan_item(device) for device in devices]
     print(f"发现 {len(records)} 台设备：")
     return _located_devices_action_flow(store_path, records)
+
+
+def _wifi_flow(config: Mapping[str, Any]) -> None:
+    global _NETWORK_INFO_CACHE
+
+    wifi_config = config.get("wifi", {})
+    verify_timeout = float(wifi_config.get("verify_timeout", 12.0))
+
+    while True:
+        _title("Wi-Fi 工具")
+        print(_format_network_status())
+        _navigation_hint()
+        print(
+            "\n请选择操作：\n"
+            "  1. 查看当前 Wi-Fi\n"
+            "  2. 列出已保存 Wi-Fi\n"
+            "  3. 扫描附近 Wi-Fi\n"
+            "  4. 显示附近可用的已保存 Wi-Fi\n"
+            "  5. 切换到指定 SSID\n"
+            "  6. 返回"
+        )
+        try:
+            choice = _ask("输入编号", "1")
+        except BackRequested:
+            return
+        _clear_screen()
+
+        try:
+            if choice == "1":
+                print(_muted("正在读取当前 Wi-Fi SSID..."), flush=True)
+                ssid = current_wifi_ssid()
+                _NETWORK_INFO_CACHE = None
+                print(f"当前 Wi-Fi SSID：{ssid or '未获取'}")
+            elif choice == "2":
+                networks = list_saved_wifi_networks()
+                if not networks:
+                    print("没有读取到已保存 Wi-Fi。")
+                else:
+                    print("已保存 Wi-Fi：")
+                    for index, ssid in enumerate(networks, start=1):
+                        print(f"{index:>2}. {ssid}")
+            elif choice == "3":
+                print(_muted("正在扫描附近 Wi-Fi..."), flush=True)
+                networks = list_nearby_wifi_networks()
+                if not networks:
+                    print("没有读取到附近 Wi-Fi。")
+                else:
+                    _print_wifi_networks(networks)
+            elif choice == "4":
+                print(_muted("正在匹配附近且已保存的 Wi-Fi..."), flush=True)
+                networks = list_available_saved_wifi_networks()
+                if not networks:
+                    print("附近没有匹配到已保存 Wi-Fi。")
+                else:
+                    print("附近可用的已保存 Wi-Fi：")
+                    for index, ssid in enumerate(networks, start=1):
+                        print(f"{index:>2}. {ssid}")
+            elif choice == "5":
+                ssid = _ask("SSID")
+                password = _ask_secret("Wi-Fi 密码；留空使用已保存凭据")
+                password = password or None
+                print(f"正在切换到 Wi-Fi：{ssid}", flush=True)
+                joined = switch_wifi_network(
+                    ssid,
+                    password=password,
+                    verify=True,
+                    verify_timeout=verify_timeout,
+                )
+                _NETWORK_INFO_CACHE = None
+                print(f"已连接到 Wi-Fi：{joined or ssid}")
+            elif choice == "6":
+                return
+            else:
+                print("未知选项，请重新输入。")
+        except WiFiError as exc:
+            print(f"Wi-Fi 操作失败：{exc}")
+
+        _pause()
+        _clear_screen()
 
 
 def _locate_flow(
@@ -1087,8 +1246,9 @@ def _print_menu(
         "  3. 查询 mDNS/Bonjour 详细信息\n"
         "  4. 管理已保存设备\n"
         "  5. 并发 ping / TCP 负载测试\n"
+        "  6. Wi-Fi 工具\n"
         "  r. 刷新当前网络\n"
-        "  6. 退出"
+        "  7. 退出"
     )
 
 
@@ -1161,9 +1321,11 @@ def run_interactive(
                 elif choice == "5":
                     _load_test_flow(current, config)
                     _pause()
+                elif choice == "6":
+                    _wifi_flow(config)
                 elif choice == "r":
                     refresh_network = True
-                elif choice == "6":
+                elif choice == "7":
                     return 0
                 else:
                     print("未知选项，请重新输入。")

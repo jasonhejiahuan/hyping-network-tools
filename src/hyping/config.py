@@ -17,6 +17,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "poll_interval": 0.5,
         "start_discovery": True,
         "discovery_warmup": 3.0,
+        "auto_start_api": True,
+        "command": "bettercap",
+        "interface": "auto",
+        "startup_timeout": 8.0,
+        "startup_poll_interval": 0.25,
         "shutdown_on_ui_exit": True,
     },
     "scan": {
@@ -53,6 +58,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "domain": "local",
         "first": False,
         "merge": False,
+    },
+    "wifi": {
+        "verify_timeout": 12.0,
     },
 }
 

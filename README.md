@@ -162,6 +162,8 @@ http://127.0.0.1:8081
 密码：pass
 ```
 
+如果使用 `sudo` 运行，并且扫描确实需要 Bettercap、但本机 API 暂时连不上，Hyping 会按需启动本机 `bettercap` 并打开 REST API，然后再连接它。它不会在程序启动时提前启动 Bettercap。
+
 扫描时会一边发现一边打印，不需要等全部扫描结束。Hyping 会直接使用 Bettercap 已经拿到的 hostname、vendor、mDNS 信息，不再自己慢慢解析。
 
 ### 修改默认配置
@@ -206,6 +208,18 @@ sudo PYTHONPATH=src python -m hyping.main scan --scanner builtin --passes 5 --ti
 PYTHONPATH=src python -m hyping.main mdns-info --hostname IvandeMacBook-Air.local --merge
 ```
 
+查看和切换 Wi-Fi：
+
+```bash
+PYTHONPATH=src python -m hyping.main wifi current
+PYTHONPATH=src python -m hyping.main wifi saved
+PYTHONPATH=src python -m hyping.main wifi nearby
+PYTHONPATH=src python -m hyping.main wifi available
+PYTHONPATH=src python -m hyping.main wifi switch SCBS-Guest --password Guest2017
+```
+
+`wifi available` 会列出“附近可见且已经保存”的 Wi-Fi。切换 SSID 使用 macOS 的 `networksetup`；如果省略 `--password`，系统会尝试使用已经保存的凭据。
+
 运行简单负载测试：
 
 ```bash
@@ -240,7 +254,7 @@ PYTHONPATH=src python -m hyping.main load 192.168.10.210 --protocol tcp --port 5
 sudo PYTHONPATH=src python -m hyping.main ui
 ```
 
-不使用 `sudo` 也可以运行。Hyping 仍会尝试 DNS、mDNS 和系统 ARP 缓存。
+不使用 `sudo` 也可以运行。Hyping 仍会尝试 DNS、mDNS 和系统 ARP 缓存。Bettercap API 自动启动也只会在 `sudo` 下尝试；普通权限下会提示你先启动 API 或改用其他方式。
 
 如果程序真的在提升权限下运行，主界面会显示对应提示；否则不会显示。
 
@@ -442,6 +456,11 @@ username: user
 password: pass
 ```
 
+When running with `sudo`, if a Bettercap scan is requested and the local REST
+API is unreachable, Hyping can start the local `bettercap` process on demand,
+enable the REST API, and then connect to it. It does not start Bettercap just
+because the program opened.
+
 The scan prints devices as they are found, so you do not have to wait for the
 whole scan to finish before seeing results. Hyping uses the hostname, vendor and
 mDNS information already collected by Bettercap.
@@ -491,6 +510,20 @@ Read mDNS / Bonjour info:
 PYTHONPATH=src python -m hyping.main mdns-info --hostname IvandeMacBook-Air.local --merge
 ```
 
+Show and switch Wi-Fi networks:
+
+```bash
+PYTHONPATH=src python -m hyping.main wifi current
+PYTHONPATH=src python -m hyping.main wifi saved
+PYTHONPATH=src python -m hyping.main wifi nearby
+PYTHONPATH=src python -m hyping.main wifi available
+PYTHONPATH=src python -m hyping.main wifi switch SCBS-Guest --password Guest2017
+```
+
+`wifi available` lists saved Wi-Fi networks that are currently visible nearby.
+Switching uses macOS `networksetup`; if `--password` is omitted, macOS will try
+saved credentials.
+
 Run a quick load test:
 
 ```bash
@@ -527,7 +560,9 @@ sudo PYTHONPATH=src python -m hyping.main ui
 ```
 
 Without `sudo`, Hyping still tries safer methods such as DNS, mDNS, and the
-system ARP cache.
+system ARP cache. On-demand Bettercap API startup is only attempted while
+running with `sudo`; otherwise Hyping asks you to start the API yourself or use
+another scanner path.
 
 The UI only shows the elevated permission line when it is actually running with
 that permission.

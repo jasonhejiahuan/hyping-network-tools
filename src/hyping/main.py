@@ -9,6 +9,7 @@ from hyping.discovery.arp import can_run_active_arp_scan, list_network_devices
 from hyping.discovery.bettercap import (
     BettercapAPIError,
     BettercapClient,
+    ensure_bettercap_api_online,
     list_bettercap_hosts,
     record_from_bettercap_host,
 )
@@ -22,6 +23,15 @@ from hyping.discovery.mdns import (
 )
 from hyping.discovery.network import detect_local_ipv4_network
 from hyping.discovery.resolver import DeviceNotFoundError, locate_device
+from hyping.discovery.wifi import (
+    WiFiError,
+    WiFiNetwork,
+    current_wifi_ssid,
+    list_available_saved_wifi_networks,
+    list_nearby_wifi_networks,
+    list_saved_wifi_networks,
+    switch_wifi_network,
+)
 from hyping.interactive import run_interactive
 from hyping.loadtest import LoadTestConfig, run_load_test
 from hyping.storage import DEFAULT_STORE_PATH
@@ -83,6 +93,30 @@ def _print_scan_item(index: int, item) -> None:
     )
 
 
+def _wifi_network_to_record(network: WiFiNetwork) -> dict[str, object]:
+    return {
+        "ssid": network.ssid,
+        "current": network.current,
+        "phy_mode": network.phy_mode,
+        "channel": network.channel,
+        "security": network.security,
+        "signal_noise": network.signal_noise,
+    }
+
+
+def _print_wifi_networks(networks: Sequence[WiFiNetwork]) -> None:
+    print(" #  SSID                         频段/信道              安全性")
+    print("─" * 72)
+    for index, network in enumerate(networks, start=1):
+        marker = "*" if network.current else " "
+        print(
+            f"{index:>2}{marker} "
+            f"{network.ssid:<28} "
+            f"{str(network.channel or '-'):<20} "
+            f"{network.security or '-'}"
+        )
+
+
 def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentParser:
     config = config or {}
     scan_config = config.get("scan", {})
@@ -90,6 +124,7 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
     load_config = config.get("load", {})
     locate_config = config.get("locate", {})
     mdns_config = config.get("mdns", {})
+    wifi_config = config.get("wifi", {})
 
     parser = argparse.ArgumentParser(
         prog="hyping",
@@ -204,6 +239,37 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
         help="send 'net.recon on' and 'net.probe on' to Bettercap",
     )
     scan.add_argument(
+        "--auto-start-bettercap-api",
+        action=argparse.BooleanOptionalAction,
+        default=bettercap_config.get("auto_start_api", True),
+        help=(
+            "when using sudo, start local bettercap REST API only if it is needed "
+            "and unreachable"
+        ),
+    )
+    scan.add_argument(
+        "--bettercap-command",
+        default=bettercap_config.get("command", "bettercap"),
+        help="bettercap executable used for on-demand API startup",
+    )
+    scan.add_argument(
+        "--bettercap-interface",
+        default=bettercap_config.get("interface", "auto"),
+        help="interface passed to bettercap on startup; 'auto' lets bettercap choose",
+    )
+    scan.add_argument(
+        "--bettercap-startup-timeout",
+        type=float,
+        default=bettercap_config.get("startup_timeout", 8.0),
+        help="seconds to wait for an auto-started Bettercap API",
+    )
+    scan.add_argument(
+        "--bettercap-startup-poll",
+        type=float,
+        default=bettercap_config.get("startup_poll_interval", 0.25),
+        help="poll interval while waiting for Bettercap API startup",
+    )
+    scan.add_argument(
         "--timeout",
         type=float,
         default=scan_config.get("timeout", 0.5),
@@ -283,6 +349,90 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
         action=argparse.BooleanOptionalAction,
         default=mdns_config.get("merge", False),
         help="merge all matching services for the hostname into one key/value list",
+    )
+
+    wifi = subparsers.add_parser(
+        "wifi",
+        help="show saved/nearby Wi-Fi networks or switch SSID on macOS",
+    )
+    wifi.add_argument(
+        "--interface",
+        help="Wi-Fi interface, e.g. en0; defaults to auto-detected Wi-Fi device",
+    )
+    wifi_subparsers = wifi.add_subparsers(dest="wifi_command")
+
+    wifi_current = wifi_subparsers.add_parser(
+        "current",
+        help="show the current Wi-Fi SSID",
+    )
+    wifi_current.add_argument(
+        "--json",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="print JSON",
+    )
+
+    wifi_saved = wifi_subparsers.add_parser(
+        "saved",
+        help="list saved/preferred Wi-Fi networks",
+    )
+    wifi_saved.add_argument(
+        "--json",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="print JSON",
+    )
+
+    wifi_nearby = wifi_subparsers.add_parser(
+        "nearby",
+        help="scan nearby Wi-Fi networks with system_profiler",
+    )
+    wifi_nearby.add_argument(
+        "--include-current",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="include the currently connected SSID in the result",
+    )
+    wifi_nearby.add_argument(
+        "--json",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="print JSON",
+    )
+
+    wifi_available = wifi_subparsers.add_parser(
+        "available",
+        aliases=["saved-nearby"],
+        help="list saved Wi-Fi networks that are visible nearby",
+    )
+    wifi_available.add_argument(
+        "--json",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="print JSON",
+    )
+
+    wifi_switch = wifi_subparsers.add_parser(
+        "switch",
+        aliases=["connect"],
+        help="switch to the specified Wi-Fi SSID",
+    )
+    wifi_switch.add_argument("ssid", help="SSID to join")
+    wifi_switch.add_argument(
+        "--password",
+        help="Wi-Fi password; omit to use saved credentials when available",
+    )
+    wifi_switch.add_argument(
+        "--verify",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="verify the current SSID after switching",
+    )
+    wifi_switch.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=wifi_config.get("verify_timeout", 12.0),
+        help="seconds to wait while verifying the joined SSID",
     )
 
     interactive = subparsers.add_parser(
@@ -418,6 +568,73 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "wifi":
+        try:
+            if args.wifi_command == "current":
+                ssid = current_wifi_ssid(args.interface)
+                if args.json:
+                    print(json.dumps({"ssid": ssid}, ensure_ascii=False, indent=2))
+                else:
+                    print(f"当前 Wi-Fi SSID：{ssid or '未获取'}")
+                return 0
+
+            if args.wifi_command == "saved":
+                networks = list_saved_wifi_networks(args.interface)
+                if args.json:
+                    print(json.dumps(networks, ensure_ascii=False, indent=2))
+                else:
+                    print("已保存 Wi-Fi：")
+                    for index, ssid in enumerate(networks, start=1):
+                        print(f"{index:>2}. {ssid}")
+                return 0
+
+            if args.wifi_command == "nearby":
+                networks = list_nearby_wifi_networks(
+                    include_current=args.include_current
+                )
+                if args.json:
+                    print(
+                        json.dumps(
+                            [_wifi_network_to_record(network) for network in networks],
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                else:
+                    _print_wifi_networks(networks)
+                return 0
+
+            if args.wifi_command in {"available", "saved-nearby"}:
+                networks = list_available_saved_wifi_networks(args.interface)
+                if args.json:
+                    print(json.dumps(networks, ensure_ascii=False, indent=2))
+                else:
+                    print("附近可用的已保存 Wi-Fi：")
+                    for index, ssid in enumerate(networks, start=1):
+                        print(f"{index:>2}. {ssid}")
+                return 0
+
+            if args.wifi_command in {"switch", "connect"}:
+                ssid = switch_wifi_network(
+                    args.ssid,
+                    password=args.password,
+                    interface=args.interface,
+                    verify=args.verify,
+                    verify_timeout=args.verify_timeout,
+                )
+                if args.verify:
+                    print(f"已连接到 Wi-Fi：{ssid or args.ssid}")
+                else:
+                    print(f"已发送 Wi-Fi 切换命令：{args.ssid}")
+                return 0
+        except WiFiError as exc:
+            parser.exit(1, f"{exc}\n")
+
+        parser.exit(
+            2,
+            "wifi requires a subcommand: current/saved/nearby/available/switch\n",
+        )
+
     if args.command in {"scan", "list"}:
         discovered_count = 0
 
@@ -440,6 +657,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.bettercap_user,
                     args.bettercap_pass,
                     timeout=args.bettercap_api_timeout,
+                )
+                bettercap_interface = (
+                    None
+                    if str(args.bettercap_interface).casefold() == "auto"
+                    else args.bettercap_interface
+                )
+                ensure_bettercap_api_online(
+                    client,
+                    online_check_timeout=config.get("bettercap", {}).get(
+                        "online_check_timeout",
+                        0.25,
+                    ),
+                    auto_start=args.auto_start_bettercap_api,
+                    command=args.bettercap_command,
+                    interface=bettercap_interface,
+                    startup_timeout=args.bettercap_startup_timeout,
+                    startup_poll_interval=args.bettercap_startup_poll,
+                    on_status=None
+                    if args.json
+                    else lambda message: print(message, flush=True),
                 )
                 if not client.is_online(timeout=0.25):
                     parser.exit(
