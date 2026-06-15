@@ -4,7 +4,14 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-DEFAULT_CONFIG_PATH = Path.home() / ".hyping" / "config.json"
+from hyping.paths import (
+    CONFIG_PATH,
+    WIFI_ROTATION_PATH,
+    copy_legacy_file_if_present,
+    legacy_hyping_path,
+)
+
+DEFAULT_CONFIG_PATH = CONFIG_PATH
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "bettercap": {
@@ -62,6 +69,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "wifi": {
         "verify_timeout": 12.0,
     },
+    "auto_wifi_scan": {
+        "wifi_list": str(WIFI_ROTATION_PATH),
+        "restore_original": True,
+        "create_template": True,
+    },
 }
 
 
@@ -86,6 +98,10 @@ def ensure_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
     """Create the config file with defaults if missing, then load it."""
 
     if not path.exists():
+        if path == DEFAULT_CONFIG_PATH:
+            if copy_legacy_file_if_present(legacy_hyping_path("config.json"), path):
+                return ensure_config(path)
+
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2, sort_keys=True)

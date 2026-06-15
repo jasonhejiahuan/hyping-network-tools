@@ -2,10 +2,11 @@ __pycache__/
 *.pyc
 
 .venv/
-.venv-ft/
+.venv-ft/ # Virtual environment directory for feature tests (the author is using testing python version)
 
 .vscode/
 .lh/
+HypingData/
 
 *.egg-info/
 

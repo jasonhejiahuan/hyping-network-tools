@@ -61,16 +61,58 @@ def _meta_hostname(meta: dict[str, Any]) -> str | None:
     if not isinstance(values, dict):
         return None
 
-    for key in ("mdns:hostname", "mdns:Name", "mdns:CtlN"):
+    for key in (
+        "hostname",
+        "name",
+        "dhcp:hostname",
+        "dhcp:host_name",
+        "mdns:hostname",
+        "mdns:Name",
+        "mdns:CtlN",
+        "nbns:name",
+    ):
         hostname = _clean_hostname(values.get(key))
         if hostname is not None:
             return hostname
 
     for key, value in values.items():
-        if isinstance(key, str) and key.endswith(":hostname"):
+        if not isinstance(key, str):
+            continue
+        normalized = key.casefold()
+        if normalized.endswith(":hostname") or normalized.endswith(":host_name"):
             hostname = _clean_hostname(value)
             if hostname is not None:
                 return hostname
+
+    return None
+
+
+def _meta_vendor(meta: dict[str, Any]) -> str | None:
+    values = meta.get("values")
+    if not isinstance(values, dict):
+        return None
+
+    for key in (
+        "vendor",
+        "manufacturer",
+        "dhcp:vendor",
+        "dhcp:vendor_class",
+        "mdns:vendor",
+        "mdns:manufacturer",
+        "mdns:Manufacturer",
+    ):
+        vendor = _clean_text(values.get(key))
+        if vendor is not None:
+            return vendor
+
+    for key, value in values.items():
+        if not isinstance(key, str):
+            continue
+        normalized = key.casefold()
+        if "vendor" in normalized or "manufacturer" in normalized:
+            vendor = _clean_text(value)
+            if vendor is not None:
+                return vendor
 
     return None
 
@@ -88,14 +130,23 @@ def host_from_bettercap(value: dict[str, Any]) -> BettercapHost | None:
 
     meta = value.get("meta")
     meta = meta if isinstance(meta, dict) else {}
-    hostname = _clean_hostname(value.get("hostname")) or _meta_hostname(meta)
+    hostname = (
+        _clean_hostname(value.get("hostname"))
+        or _clean_hostname(value.get("name"))
+        or _meta_hostname(meta)
+    )
+    vendor = (
+        _clean_text(value.get("vendor"))
+        or _clean_text(value.get("manufacturer"))
+        or _meta_vendor(meta)
+    )
 
     return BettercapHost(
         ip=ip,
         mac=mac.lower(),
         hostname=hostname,
         alias=_clean_text(value.get("alias")),
-        vendor=_clean_text(value.get("vendor")),
+        vendor=vendor,
         first_seen=_clean_text(value.get("first_seen")),
         last_seen=_clean_text(value.get("last_seen")),
         meta=meta,
@@ -398,6 +449,8 @@ def start_bettercap_api(
         while time.monotonic() <= deadline:
             if client.is_online(timeout=min(poll_interval, client.timeout)):
                 ready = True
+                if on_status is not None:
+                    on_status(f"Bettercap API 已启动：pid {process.pid}")
                 return BettercapLaunch(pid=process.pid, command=executable)
             if process.poll() is not None:
                 msg = "bettercap 启动后过早退出"

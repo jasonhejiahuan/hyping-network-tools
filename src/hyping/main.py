@@ -4,6 +4,15 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from hyping.auto_wifi_scan import (
+    DEFAULT_WIFI_ROTATION_PATH,
+    AutoWiFiScanError,
+    expand_wifi_rotation_path,
+    find_hostname_with_bettercap_then_wifi_rotation,
+    load_wifi_scan_targets,
+    run_auto_wifi_scan,
+    write_wifi_scan_template,
+)
 from hyping.config import ensure_config
 from hyping.discovery.arp import can_run_active_arp_scan, list_network_devices
 from hyping.discovery.bettercap import (
@@ -34,7 +43,7 @@ from hyping.discovery.wifi import (
 )
 from hyping.interactive import run_interactive
 from hyping.loadtest import LoadTestConfig, run_load_test
-from hyping.storage import DEFAULT_STORE_PATH
+from hyping.storage import DEFAULT_STORE_PATH, DeviceRecord, load_device_records
 
 
 def _parse_note_hosts(values: Sequence[str]) -> dict[str, str]:
@@ -104,6 +113,136 @@ def _wifi_network_to_record(network: WiFiNetwork) -> dict[str, object]:
     }
 
 
+def _record_text(record: DeviceRecord, key: str) -> str | None:
+    value = record.get(key)
+    if not isinstance(value, str):
+        return None
+
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _normalize_saved_selector(value: str) -> str:
+    return value.strip().casefold().rstrip(".")
+
+
+def _saved_hostname(record: DeviceRecord) -> str | None:
+    hostname = _record_text(record, "hostname")
+    if hostname is None:
+        return None
+    return hostname.rstrip(".") or None
+
+
+def _format_saved_hostname_choices(records: Sequence[DeviceRecord]) -> str:
+    lines = ["可用的已保存 hostname："]
+    for index, record in enumerate(records, start=1):
+        hostname = _saved_hostname(record)
+        if hostname is None:
+            continue
+        ip = _record_text(record, "ip") or "-"
+        mac = _record_text(record, "mac") or "-"
+        note = _record_text(record, "note") or _record_text(record, "vendor") or "-"
+        lines.append(f"{index}. {hostname} | {ip} | {mac} | {note}")
+
+    if len(lines) == 1:
+        lines.append("（没有带 hostname 的保存设备）")
+    return "\n".join(lines)
+
+
+def _select_saved_hostname_record(
+    records: Sequence[DeviceRecord],
+    selector: str | None,
+) -> DeviceRecord:
+    hostname_records = [
+        (index, record)
+        for index, record in enumerate(records, start=1)
+        if _saved_hostname(record) is not None
+    ]
+    if not hostname_records:
+        msg = "没有带 hostname 的已保存设备"
+        raise ValueError(msg)
+
+    if selector is None or not selector.strip():
+        if len(hostname_records) == 1:
+            return hostname_records[0][1]
+        msg = (
+            "找到多个已保存 hostname，请使用 --saved 编号/hostname/note/IP/MAC 指定\n"
+            f"{_format_saved_hostname_choices(records)}"
+        )
+        raise ValueError(msg)
+
+    cleaned_selector = selector.strip()
+    if cleaned_selector.isdecimal():
+        selected_index = int(cleaned_selector)
+        for index, record in enumerate(records, start=1):
+            if index == selected_index:
+                hostname = _saved_hostname(record)
+                if hostname is None:
+                    msg = f"编号 {selected_index} 的保存设备没有 hostname"
+                    raise ValueError(msg)
+                return record
+        msg = f"找不到编号 {selected_index} 的保存设备"
+        raise ValueError(msg)
+
+    normalized_selector = _normalize_saved_selector(cleaned_selector)
+    matches: list[DeviceRecord] = []
+    for record in records:
+        for key in ("hostname", "note", "ip", "mac"):
+            value = _record_text(record, key)
+            if value is None:
+                continue
+            if _normalize_saved_selector(value) == normalized_selector:
+                matches.append(record)
+                break
+
+    if not matches:
+        msg = (
+            f"找不到匹配 {cleaned_selector!r} 的已保存设备\n"
+            f"{_format_saved_hostname_choices(records)}"
+        )
+        raise ValueError(msg)
+    if len(matches) > 1:
+        msg = (
+            f"{cleaned_selector!r} 匹配到多台保存设备，请改用编号\n"
+            f"{_format_saved_hostname_choices(records)}"
+        )
+        raise ValueError(msg)
+
+    hostname = _saved_hostname(matches[0])
+    if hostname is None:
+        msg = f"匹配到的保存设备没有 hostname：{cleaned_selector}"
+        raise ValueError(msg)
+    return matches[0]
+
+
+def _resolve_auto_locate_hostname(
+    *,
+    hostname: str | None,
+    saved_selector: str | None,
+    store_path: Path,
+) -> str:
+    if hostname and saved_selector is not None:
+        msg = "--hostname 和 --saved 只能选择一个"
+        raise ValueError(msg)
+
+    if saved_selector is not None:
+        record = _select_saved_hostname_record(
+            load_device_records(store_path),
+            saved_selector,
+        )
+        saved_hostname = _saved_hostname(record)
+        if saved_hostname is None:
+            msg = "匹配到的保存设备没有 hostname"
+            raise ValueError(msg)
+        return saved_hostname
+
+    cleaned = hostname.strip().rstrip(".") if hostname else ""
+    if not cleaned:
+        msg = "auto-locate 需要 --hostname，或使用 --saved 读取已保存设备"
+        raise ValueError(msg)
+    return cleaned
+
+
 def _print_wifi_networks(networks: Sequence[WiFiNetwork]) -> None:
     print(" #  SSID                         频段/信道              安全性")
     print("─" * 72)
@@ -125,6 +264,7 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
     locate_config = config.get("locate", {})
     mdns_config = config.get("mdns", {})
     wifi_config = config.get("wifi", {})
+    auto_wifi_config = config.get("auto_wifi_scan", {})
 
     parser = argparse.ArgumentParser(
         prog="hyping",
@@ -435,6 +575,251 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
         help="seconds to wait while verifying the joined SSID",
     )
 
+    auto_wifi = subparsers.add_parser(
+        "auto-wifi-scan",
+        aliases=["autoscan-wifi"],
+        help="rotate Wi-Fi SSIDs, restart Bettercap, scan hosts, and save devices",
+    )
+    auto_wifi.add_argument(
+        "--wifi-list",
+        type=Path,
+        default=expand_wifi_rotation_path(
+            auto_wifi_config.get("wifi_list", str(DEFAULT_WIFI_ROTATION_PATH))
+        ),
+        help=(
+            "JSON or CSV file containing SSIDs to rotate; defaults to "
+            f"{DEFAULT_WIFI_ROTATION_PATH}"
+        ),
+    )
+    auto_wifi.add_argument(
+        "--store",
+        type=Path,
+        default=DEFAULT_STORE_PATH,
+        help=f"device store JSON path; defaults to {DEFAULT_STORE_PATH}",
+    )
+    auto_wifi.add_argument(
+        "--interface",
+        default=wifi_config.get("interface"),
+        help="Wi-Fi interface, e.g. en0; defaults to auto-detected Wi-Fi device",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-url",
+        default=bettercap_config.get("url", "http://127.0.0.1:8081"),
+        help="Bettercap REST API base URL",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-user",
+        default=bettercap_config.get("username", "user"),
+        help="Bettercap REST API username",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-pass",
+        default=bettercap_config.get("password", "pass"),
+        help="Bettercap REST API password",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-api-timeout",
+        type=float,
+        default=bettercap_config.get("api_timeout", 3.0),
+        help="Bettercap REST API request timeout in seconds",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-command",
+        default=bettercap_config.get("command", "bettercap"),
+        help="bettercap executable used for each restarted Bettercap core",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-startup-timeout",
+        type=float,
+        default=bettercap_config.get("startup_timeout", 8.0),
+        help="seconds to wait for each restarted Bettercap API",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-startup-poll",
+        type=float,
+        default=bettercap_config.get("startup_poll_interval", 0.25),
+        help="poll interval while waiting for Bettercap API startup",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-wait",
+        type=float,
+        default=bettercap_config.get("wait", 5.0),
+        help="seconds to poll Bettercap for hosts on each Wi-Fi",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-poll",
+        type=float,
+        default=bettercap_config.get("poll_interval", 0.5),
+        help="Bettercap host polling interval in seconds",
+    )
+    auto_wifi.add_argument(
+        "--bettercap-discovery-warmup",
+        type=float,
+        default=bettercap_config.get("discovery_warmup", 3.0),
+        help="seconds to wait after starting net.recon/net.probe",
+    )
+    auto_wifi.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=wifi_config.get("verify_timeout", 12.0),
+        help="seconds to wait while verifying each joined SSID",
+    )
+    auto_wifi.add_argument(
+        "--restore-original",
+        action=argparse.BooleanOptionalAction,
+        default=auto_wifi_config.get("restore_original", True),
+        help="switch back to the original Wi-Fi after the rotation",
+    )
+    auto_wifi.add_argument(
+        "--create-template",
+        action=argparse.BooleanOptionalAction,
+        default=auto_wifi_config.get("create_template", True),
+        help="create a sample Wi-Fi rotation file when --wifi-list is missing",
+    )
+    auto_wifi.add_argument(
+        "--json",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="print JSON summary",
+    )
+
+    auto_locate = subparsers.add_parser(
+        "auto-locate",
+        aliases=["auto-find"],
+        help="find a hostname with Bettercap first, then rotate Wi-Fi if needed",
+    )
+    auto_locate.add_argument("--hostname", help="hostname to find")
+    auto_locate.add_argument(
+        "--saved",
+        nargs="?",
+        const="",
+        metavar="SELECTOR",
+        help=(
+            "use a saved device hostname; selector can be a saved-device number, "
+            "hostname, note, IP, or MAC"
+        ),
+    )
+    auto_locate.add_argument(
+        "--partial-hostname",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="allow substring hostname matching",
+    )
+    auto_locate.add_argument(
+        "--wifi-list",
+        type=Path,
+        default=expand_wifi_rotation_path(
+            auto_wifi_config.get("wifi_list", str(DEFAULT_WIFI_ROTATION_PATH))
+        ),
+        help=(
+            "JSON or CSV file containing SSIDs to rotate; defaults to "
+            f"{DEFAULT_WIFI_ROTATION_PATH}"
+        ),
+    )
+    auto_locate.add_argument(
+        "--store",
+        type=Path,
+        default=DEFAULT_STORE_PATH,
+        help=f"device store JSON path; defaults to {DEFAULT_STORE_PATH}",
+    )
+    auto_locate.add_argument(
+        "--interface",
+        default=wifi_config.get("interface"),
+        help="Wi-Fi interface, e.g. en0; defaults to auto-detected Wi-Fi device",
+    )
+    auto_locate.add_argument(
+        "--bettercap-url",
+        default=bettercap_config.get("url", "http://127.0.0.1:8081"),
+        help="Bettercap REST API base URL",
+    )
+    auto_locate.add_argument(
+        "--bettercap-user",
+        default=bettercap_config.get("username", "user"),
+        help="Bettercap REST API username",
+    )
+    auto_locate.add_argument(
+        "--bettercap-pass",
+        default=bettercap_config.get("password", "pass"),
+        help="Bettercap REST API password",
+    )
+    auto_locate.add_argument(
+        "--bettercap-api-timeout",
+        type=float,
+        default=bettercap_config.get("api_timeout", 3.0),
+        help="Bettercap REST API request timeout in seconds",
+    )
+    auto_locate.add_argument(
+        "--bettercap-online-check-timeout",
+        type=float,
+        default=bettercap_config.get("online_check_timeout", 0.25),
+        help="seconds to use for the quick Bettercap API online check",
+    )
+    auto_locate.add_argument(
+        "--auto-start-bettercap-api",
+        action=argparse.BooleanOptionalAction,
+        default=bettercap_config.get("auto_start_api", True),
+        help="start local Bettercap REST API when it is unreachable and sudo is used",
+    )
+    auto_locate.add_argument(
+        "--bettercap-command",
+        default=bettercap_config.get("command", "bettercap"),
+        help="bettercap executable used for each restarted Bettercap core",
+    )
+    auto_locate.add_argument(
+        "--bettercap-startup-timeout",
+        type=float,
+        default=bettercap_config.get("startup_timeout", 8.0),
+        help="seconds to wait for each restarted Bettercap API",
+    )
+    auto_locate.add_argument(
+        "--bettercap-startup-poll",
+        type=float,
+        default=bettercap_config.get("startup_poll_interval", 0.25),
+        help="poll interval while waiting for Bettercap API startup",
+    )
+    auto_locate.add_argument(
+        "--bettercap-wait",
+        type=float,
+        default=bettercap_config.get("wait", 5.0),
+        help="seconds to poll Bettercap for hosts on each Wi-Fi",
+    )
+    auto_locate.add_argument(
+        "--bettercap-poll",
+        type=float,
+        default=bettercap_config.get("poll_interval", 0.5),
+        help="Bettercap host polling interval in seconds",
+    )
+    auto_locate.add_argument(
+        "--bettercap-discovery-warmup",
+        type=float,
+        default=bettercap_config.get("discovery_warmup", 3.0),
+        help="seconds to wait after starting net.recon/net.probe",
+    )
+    auto_locate.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=wifi_config.get("verify_timeout", 12.0),
+        help="seconds to wait while verifying each joined SSID",
+    )
+    auto_locate.add_argument(
+        "--restore-original",
+        action=argparse.BooleanOptionalAction,
+        default=auto_wifi_config.get("restore_original", True),
+        help="switch back to the original Wi-Fi after the rotation",
+    )
+    auto_locate.add_argument(
+        "--create-template",
+        action=argparse.BooleanOptionalAction,
+        default=auto_wifi_config.get("create_template", True),
+        help="create a sample Wi-Fi rotation file when --wifi-list is missing",
+    )
+    auto_locate.add_argument(
+        "--json",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="print JSON summary",
+    )
+
     interactive = subparsers.add_parser(
         "ui",
         aliases=["interactive"],
@@ -634,6 +1019,142 @@ def main(argv: Sequence[str] | None = None) -> int:
             2,
             "wifi requires a subcommand: current/saved/nearby/available/switch\n",
         )
+
+    if args.command in {"auto-locate", "auto-find"}:
+        try:
+            hostname = _resolve_auto_locate_hostname(
+                hostname=args.hostname,
+                saved_selector=args.saved,
+                store_path=args.store,
+            )
+            if args.create_template and not args.wifi_list.exists():
+                write_wifi_scan_template(args.wifi_list)
+                parser.exit(
+                    1,
+                    f"已创建 Wi-Fi 轮换配置模板：{args.wifi_list}\n"
+                    "请编辑 SSID/password 后重新运行。\n",
+                )
+            targets = load_wifi_scan_targets(args.wifi_list)
+            client = BettercapClient(
+                args.bettercap_url,
+                args.bettercap_user,
+                args.bettercap_pass,
+                timeout=args.bettercap_api_timeout,
+            )
+            result = find_hostname_with_bettercap_then_wifi_rotation(
+                hostname,
+                targets,
+                client=client,
+                interface=args.interface,
+                bettercap_command=args.bettercap_command,
+                auto_start_bettercap_api=args.auto_start_bettercap_api,
+                online_check_timeout=args.bettercap_online_check_timeout,
+                startup_timeout=args.bettercap_startup_timeout,
+                startup_poll_interval=args.bettercap_startup_poll,
+                bettercap_wait=args.bettercap_wait,
+                bettercap_poll=args.bettercap_poll,
+                discovery_warmup=args.bettercap_discovery_warmup,
+                verify_timeout=args.verify_timeout,
+                restore_original=args.restore_original,
+                partial_hostname=args.partial_hostname,
+                store_path=args.store,
+                on_status=None
+                if args.json
+                else lambda message: print(message, flush=True),
+            )
+        except (AutoWiFiScanError, BettercapAPIError, ValueError, WiFiError) as exc:
+            parser.exit(1, f"{exc}\n")
+
+        record = _scan_item_to_record(result.host) if result.host else None
+        if record is not None and result.ssid:
+            record["ssid"] = result.ssid
+        summary = {
+            "query": result.query,
+            "found": result.host is not None,
+            "ssid": result.ssid,
+            "scanned_ssids": list(result.scanned_ssids),
+            "saved_count": result.saved_count,
+            "host": record,
+        }
+        if args.json:
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        elif result.host is not None:
+            print("已找到设备：")
+            _print_scan_header()
+            _print_scan_item(1, result.host)
+            source = result.ssid or "当前 Wi-Fi / 当前 Bettercap 会话（SSID 未获取）"
+            print(f"SSID：{result.ssid or '未获取'}")
+            print(f"来源：{source}")
+            print(f"写入/更新记录数：{result.saved_count}")
+            print(f"设备库：{args.store}")
+        else:
+            print(f"未找到 hostname：{hostname}")
+            if result.scanned_ssids:
+                print("已扫描 Wi-Fi：" + ", ".join(result.scanned_ssids))
+            print(f"设备库：{args.store}")
+            return 1
+        return 0
+
+    if args.command in {"auto-wifi-scan", "autoscan-wifi"}:
+        try:
+            if args.create_template and not args.wifi_list.exists():
+                write_wifi_scan_template(args.wifi_list)
+                parser.exit(
+                    1,
+                    f"已创建 Wi-Fi 轮换配置模板：{args.wifi_list}\n"
+                    "请编辑 SSID/password 后重新运行。\n",
+                )
+            targets = load_wifi_scan_targets(args.wifi_list)
+            if not args.json:
+                print(
+                    f"自动轮换扫描：{len(targets)} 个 Wi-Fi，配置 {args.wifi_list}",
+                    flush=True,
+                )
+            client = BettercapClient(
+                args.bettercap_url,
+                args.bettercap_user,
+                args.bettercap_pass,
+                timeout=args.bettercap_api_timeout,
+            )
+            results = run_auto_wifi_scan(
+                targets,
+                client=client,
+                interface=args.interface,
+                bettercap_command=args.bettercap_command,
+                startup_timeout=args.bettercap_startup_timeout,
+                startup_poll_interval=args.bettercap_startup_poll,
+                bettercap_wait=args.bettercap_wait,
+                bettercap_poll=args.bettercap_poll,
+                discovery_warmup=args.bettercap_discovery_warmup,
+                verify_timeout=args.verify_timeout,
+                restore_original=args.restore_original,
+                store_path=args.store,
+                on_status=None
+                if args.json
+                else lambda message: print(message, flush=True),
+            )
+        except (AutoWiFiScanError, BettercapAPIError, WiFiError) as exc:
+            parser.exit(1, f"{exc}\n")
+
+        summary = [
+            {
+                "ssid": result.ssid,
+                "host_count": len(result.hosts),
+                "saved_count": result.saved_count,
+                "hosts": [_scan_item_to_record(host) for host in result.hosts],
+            }
+            for result in results
+        ]
+        if args.json:
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        else:
+            for result in results:
+                print(
+                    f"{result.ssid}: 发现 {len(result.hosts)} 台，"
+                    f"写入/更新 {result.saved_count} 条。"
+                )
+            print(f"设备库：{args.store}")
+        return 0
 
     if args.command in {"scan", "list"}:
         discovered_count = 0

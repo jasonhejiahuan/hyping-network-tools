@@ -39,6 +39,27 @@ class BettercapTests(unittest.TestCase):
         self.assertEqual(host.display_name, "Ivan's MacBook Air")
         self.assertEqual(host.vendor, "Apple, Inc.")
 
+    def test_host_from_bettercap_reads_hostname_and_vendor_from_meta(self) -> None:
+        host = host_from_bettercap(
+            {
+                "ipv4": "192.168.10.211",
+                "mac": "AA:BA:36:4D:1A:6C",
+                "hostname": "",
+                "vendor": "",
+                "meta": {
+                    "values": {
+                        "dhcp:hostname": "printer.local.",
+                        "mdns:Manufacturer": "Printer Inc.",
+                    }
+                },
+            }
+        )
+
+        self.assertIsNotNone(host)
+        assert host is not None
+        self.assertEqual(host.hostname, "printer.local")
+        self.assertEqual(host.vendor, "Printer Inc.")
+
     def test_hosts_from_session_includes_interface_gateway_and_lan(self) -> None:
         session = {
             "interface": {

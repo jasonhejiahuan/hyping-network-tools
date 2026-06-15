@@ -3,14 +3,33 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-DEFAULT_STORE_PATH = Path.home() / ".hyping" / "devices.json"
+from hyping.paths import (
+    DEVICE_STORE_PATH,
+    copy_legacy_file_if_present,
+    legacy_hyping_path,
+)
+
+DEFAULT_STORE_PATH = DEVICE_STORE_PATH
 
 DeviceRecord = dict[str, Any]
+
+
+def _migrate_default_store_if_needed(path: Path) -> None:
+    if path != DEFAULT_STORE_PATH or path.exists():
+        return
+
+    for legacy_path in (
+        legacy_hyping_path("devices.json"),
+        Path("/var/root/.hyping/devices.json"),
+    ):
+        if copy_legacy_file_if_present(legacy_path, path):
+            return
 
 
 def load_device_records(path: Path = DEFAULT_STORE_PATH) -> list[DeviceRecord]:
     """Load saved device records from JSON."""
 
+    _migrate_default_store_if_needed(path)
     if not path.exists():
         return []
 
