@@ -167,9 +167,9 @@ def write_wifi_scan_template(path: Path = DEFAULT_WIFI_ROTATION_PATH) -> None:
         json.dumps(
             {
                 "networks": [
-                    {"ssid": "SCBS-Student", "password": None},
-                    {"ssid": "SCBS-Teacher", "password": None},
-                    {"ssid": "SCBS-Staff", "password": None},
+                    {"ssid": "Example-Student", "password": None},
+                    {"ssid": "Example-Teacher", "password": None},
+                    {"ssid": "Example-Staff", "password": None},
                 ]
             },
             ensure_ascii=False,
