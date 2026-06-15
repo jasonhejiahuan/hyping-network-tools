@@ -1,3 +1,4 @@
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -30,8 +31,72 @@ _NETWORK_PROPERTY_KEYS = {
     "MCS Index",
 }
 
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+_WIFI_INTERFACE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,31}")
 
-def _run(command: list[str], *, timeout: float = 10.0) -> str:
+
+def _reject_control_chars(value: str, label: str) -> None:
+    if _CONTROL_CHAR_RE.search(value):
+        msg = f"{label} 不能包含控制字符"
+        raise WiFiError(msg)
+
+
+def _validate_wifi_interface(interface: str) -> str:
+    cleaned = interface.strip()
+    if not cleaned:
+        msg = "Wi-Fi 接口不能为空"
+        raise WiFiError(msg)
+    if _WIFI_INTERFACE_RE.fullmatch(cleaned) is None:
+        msg = f"Wi-Fi 接口名称无效：{interface!r}"
+        raise WiFiError(msg)
+
+    hardware_port = _macos_hardware_ports().get(cleaned)
+    if hardware_port is None:
+        msg = f"未知 Wi-Fi 接口：{cleaned}"
+        raise WiFiError(msg)
+    if hardware_port.casefold() not in {"wi-fi", "airport"}:
+        msg = f"接口不是 Wi-Fi 设备：{cleaned}"
+        raise WiFiError(msg)
+    return cleaned
+
+
+def _resolve_wifi_interface(interface: str | None) -> str:
+    if interface is None:
+        return wifi_interface()
+    return _validate_wifi_interface(interface)
+
+
+def _validate_ssid(ssid: str) -> str:
+    cleaned = ssid.strip()
+    if not cleaned:
+        msg = "SSID 不能为空"
+        raise WiFiError(msg)
+    _reject_control_chars(cleaned, "SSID")
+    return cleaned
+
+
+def _validate_password(password: str | None) -> str | None:
+    if password is None or password == "":
+        return None
+    _reject_control_chars(password, "Wi-Fi 密码")
+    return password
+
+
+def _run_networksetup(arguments: list[str], *, timeout: float = 10.0) -> str:
+    return _run_fixed_command("networksetup", arguments, timeout=timeout)
+
+
+def _run_system_profiler(*, timeout: float = 10.0) -> str:
+    return _run_fixed_command("system_profiler", ["SPAirPortDataType"], timeout=timeout)
+
+
+def _run_fixed_command(
+    executable: str,
+    arguments: list[str],
+    *,
+    timeout: float,
+) -> str:
+    command = [executable, *arguments]
     try:
         result = subprocess.run(
             command,
@@ -44,7 +109,7 @@ def _run(command: list[str], *, timeout: float = 10.0) -> str:
         msg = f"command not found: {command[0]}"
         raise WiFiError(msg) from exc
     except (subprocess.SubprocessError, OSError) as exc:
-        msg = f"could not run {' '.join(command)}: {exc}"
+        msg = f"could not run {executable}: {exc}"
         raise WiFiError(msg) from exc
 
     output = f"{result.stdout}\n{result.stderr}".strip()
@@ -76,8 +141,8 @@ def _parse_preferred_wifi_output(output: str) -> list[str]:
 
 
 def list_saved_wifi_networks(interface: str | None = None) -> list[str]:
-    interface = interface or wifi_interface()
-    output = _run(["networksetup", "-listpreferredwirelessnetworks", interface])
+    interface = _resolve_wifi_interface(interface)
+    output = _run_networksetup(["-listpreferredwirelessnetworks", interface])
     return _parse_preferred_wifi_output(output)
 
 
@@ -131,7 +196,7 @@ def _parse_system_profiler_wifi_networks(output: str) -> list[WiFiNetwork]:
 
 
 def list_nearby_wifi_networks(*, include_current: bool = True) -> list[WiFiNetwork]:
-    output = _run(["system_profiler", "SPAirPortDataType"], timeout=8.0)
+    output = _run_system_profiler(timeout=8.0)
     networks = _parse_system_profiler_wifi_networks(output)
     if include_current:
         return networks
@@ -147,10 +212,13 @@ def list_available_saved_wifi_networks(
 
 
 def current_wifi_ssid(interface: str | None = None) -> str | None:
-    interface = interface or wifi_interface()
+    interface = _resolve_wifi_interface(interface)
+    return _current_wifi_ssid_for_interface(interface)
 
+
+def _current_wifi_ssid_for_interface(interface: str) -> str | None:
     try:
-        output = _run(["system_profiler", "SPAirPortDataType"], timeout=8.0)
+        output = _run_system_profiler(timeout=8.0)
     except WiFiError:
         output = ""
     ssid = _ssid_from_system_profiler(output)
@@ -158,7 +226,10 @@ def current_wifi_ssid(interface: str | None = None) -> str | None:
         return ssid
 
     try:
-        output = _run(["networksetup", "-getairportnetwork", interface], timeout=2.0)
+        output = _run_networksetup(
+            ["-getairportnetwork", interface],
+            timeout=2.0,
+        )
     except WiFiError:
         return None
 
@@ -179,17 +250,15 @@ def switch_wifi_network(
     verify: bool = True,
     verify_timeout: float = 12.0,
 ) -> str | None:
-    ssid = ssid.strip()
-    if not ssid:
-        msg = "SSID 不能为空"
-        raise WiFiError(msg)
+    ssid = _validate_ssid(ssid)
+    password = _validate_password(password)
 
-    interface = interface or wifi_interface()
-    command = ["networksetup", "-setairportnetwork", interface, ssid]
+    interface = _resolve_wifi_interface(interface)
+    command = ["-setairportnetwork", interface, ssid]
     if password:
         command.append(password)
 
-    output = _run(command, timeout=45.0)
+    output = _run_networksetup(command, timeout=45.0)
     if "Failed to join network" in output:
         raise WiFiError(output)
 
@@ -199,7 +268,7 @@ def switch_wifi_network(
     deadline = time.monotonic() + verify_timeout
     last_ssid: str | None = None
     while time.monotonic() <= deadline:
-        last_ssid = current_wifi_ssid(interface)
+        last_ssid = _current_wifi_ssid_for_interface(interface)
         if last_ssid == ssid:
             return last_ssid
         time.sleep(0.5)

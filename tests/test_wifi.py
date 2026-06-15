@@ -72,12 +72,29 @@ Wi-Fi:
                 ["Example-Student", "Example-Guest"],
             )
 
+    def test_saved_wifi_rejects_untrusted_interface_before_run(self) -> None:
+        with patch("hyping.discovery.wifi._run_networksetup") as run:
+            with self.assertRaises(WiFiError):
+                list_available_saved_wifi_networks("en0;touch /tmp/pwned")
+
+        run.assert_not_called()
+
+    def test_saved_wifi_requires_known_wifi_interface(self) -> None:
+        with patch(
+            "hyping.discovery.wifi._macos_hardware_ports",
+            return_value={"en1": "Thunderbolt Ethernet"},
+        ), patch("hyping.discovery.wifi._run_networksetup") as run:
+            with self.assertRaises(WiFiError):
+                list_available_saved_wifi_networks("en1")
+
+        run.assert_not_called()
+
     def test_switch_wifi_detects_successful_verified_join(self) -> None:
         with patch("hyping.discovery.wifi.wifi_interface", return_value="en0"), patch(
-            "hyping.discovery.wifi._run",
+            "hyping.discovery.wifi._run_networksetup",
             return_value="",
         ) as run, patch(
-            "hyping.discovery.wifi.current_wifi_ssid",
+            "hyping.discovery.wifi._current_wifi_ssid_for_interface",
             return_value="Example-Guest",
         ), patch("hyping.discovery.wifi.time.sleep", lambda _: None):
             self.assertEqual(
@@ -87,7 +104,6 @@ Wi-Fi:
 
         run.assert_called_once_with(
             [
-                "networksetup",
                 "-setairportnetwork",
                 "en0",
                 "Example-Guest",
@@ -98,11 +114,32 @@ Wi-Fi:
 
     def test_switch_wifi_treats_failed_output_as_error(self) -> None:
         with patch("hyping.discovery.wifi.wifi_interface", return_value="en0"), patch(
-            "hyping.discovery.wifi._run",
+            "hyping.discovery.wifi._run_networksetup",
             return_value="Failed to join network Example-Guest.",
         ):
             with self.assertRaises(WiFiError):
                 switch_wifi_network("Example-Guest", verify=False)
+
+    def test_switch_wifi_rejects_control_char_ssid(self) -> None:
+        with patch("hyping.discovery.wifi._run_networksetup") as run:
+            with self.assertRaises(WiFiError):
+                switch_wifi_network("Example\nGuest", verify=False)
+
+        run.assert_not_called()
+
+    def test_switch_wifi_does_not_echo_password_in_run_error(self) -> None:
+        with patch("hyping.discovery.wifi.wifi_interface", return_value="en0"), patch(
+            "hyping.discovery.wifi.subprocess.run",
+            side_effect=OSError("boom"),
+        ):
+            with self.assertRaises(WiFiError) as context:
+                switch_wifi_network(
+                    "Example-Guest",
+                    password="secret-password",
+                    verify=False,
+                )
+
+        self.assertNotIn("secret-password", str(context.exception))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hyping Web UI</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">H</span>
+          <div>
+            <strong>Hyping</strong>
+            <span>LAN Console</span>
+          </div>
+        </div>
+        <nav class="nav" aria-label="主菜单">
+          <button class="nav-item active" data-section="overview">
+            <span class="nav-icon"></span><span>总览</span>
+          </button>
+          <button class="nav-item" data-section="discover">
+            <span class="nav-icon"></span><span>发现</span>
+          </button>
+          <button class="nav-item" data-section="devices">
+            <span class="nav-icon"></span><span>设备库</span>
+          </button>
+          <button class="nav-item" data-section="mdns">
+            <span class="nav-icon"></span><span>mDNS</span>
+          </button>
+          <button class="nav-item" data-section="wifi">
+            <span class="nav-icon"></span><span>Wi‑Fi</span>
+          </button>
+          <button class="nav-item" data-section="load">
+            <span class="nav-icon"></span><span>负载测试</span>
+          </button>
+          <button class="nav-item" data-section="automation">
+            <span class="nav-icon"></span><span>自动化</span>
+          </button>
+          <button class="nav-item" data-section="settings">
+            <span class="nav-icon"></span><span>设置</span>
+          </button>
+        </nav>
+        <div class="sidebar-status">
+          <span class="status-dot" id="side-bettercap-dot"></span>
+          <span id="side-bettercap">Bettercap 未知</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">当前网络</p>
+            <h1 id="page-title">总览</h1>
+          </div>
+          <div class="context-strip" id="context-strip">
+            <span>SSID: <strong id="ctx-ssid">读取中</strong></span>
+            <span>接口: <strong id="ctx-interface">-</strong></span>
+            <span>网段: <strong id="ctx-network">-</strong></span>
+            <span>权限: <strong id="ctx-permission">-</strong></span>
+          </div>
+          <div class="top-actions">
+            <button class="icon-button" id="refresh-all" title="刷新状态">
+              <span class="refresh-icon"></span>
+            </button>
+          </div>
+        </header>
+
+        <section class="section active" id="section-overview">
+          <div class="grid overview-grid">
+            <section class="panel map-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Subnet Map</p>
+                  <h2>局域网拓扑</h2>
+                </div>
+                <div class="legend">
+                  <span><i class="legend-dot online"></i>在线</span>
+                  <span><i class="legend-dot saved"></i>已保存</span>
+                  <span><i class="legend-dot selected"></i>当前</span>
+                </div>
+              </div>
+              <canvas id="topology-canvas" width="860" height="420"></canvas>
+            </section>
+
+            <aside class="panel control-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Control</p>
+                  <h2>快速操作</h2>
+                </div>
+              </div>
+              <div class="quick-stack">
+                <button class="primary action" data-action="quick-scan">扫描设备</button>
+                <button class="secondary action" data-section-target="discover">
+                  定位主机
+                </button>
+                <button class="secondary action" data-section-target="load">
+                  负载测试
+                </button>
+              </div>
+              <div class="metrics">
+                <div>
+                  <span id="metric-saved">0</span>
+                  <label>已保存</label>
+                </div>
+                <div>
+                  <span id="metric-online">0</span>
+                  <label>扫描结果</label>
+                </div>
+                <div>
+                  <span id="metric-api">-</span>
+                  <label>API</label>
+                </div>
+              </div>
+              <div class="activity-log" id="overview-log"></div>
+            </aside>
+          </div>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Devices</p>
+                <h2>最近设备</h2>
+              </div>
+              <button class="text-button" data-section-target="devices">打开设备库</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>hostname</th>
+                    <th>IP</th>
+                    <th>MAC</th>
+                    <th>备注 / 厂商</th>
+                    <th>SSID</th>
+                  </tr>
+                </thead>
+                <tbody id="overview-devices"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="section" id="section-discover">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Locate</p>
+                  <h2>主机定位</h2>
+                </div>
+              </div>
+              <form class="form-grid" id="locate-form">
+                <label>hostname<input name="hostname" placeholder="MacBook.local" /></label>
+                <label>note<input name="note" placeholder="办公室打印机" /></label>
+                <label>timeout<input name="timeout" type="number" value="1" min="0.1" step="0.1" /></label>
+                <label>网段<input name="network" placeholder="auto / 10.50.50.0/24" /></label>
+                <label class="check"><input name="partial_hostname" type="checkbox" /> 部分 hostname</label>
+                <label class="check"><input name="partial_note" type="checkbox" /> 部分备注</label>
+                <label class="check"><input name="scan_network" type="checkbox" /> 扫描网段</label>
+                <button class="primary" type="submit">开始定位</button>
+              </form>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Scan</p>
+                  <h2>设备扫描</h2>
+                </div>
+              </div>
+              <form class="form-grid" id="scan-form">
+                <label>扫描来源
+                  <select name="scanner">
+                    <option value="bettercap">Bettercap</option>
+                    <option value="builtin">内置 ARP</option>
+                  </select>
+                </label>
+                <label>网段<input name="network" value="auto" /></label>
+                <label>等待秒<input name="wait" type="number" value="5" min="0" step="0.5" /></label>
+                <label>扫描轮数<input name="passes" type="number" value="3" min="1" /></label>
+                <label class="check"><input name="start_discovery" type="checkbox" checked /> 启动 net.recon/probe</label>
+                <label class="check"><input name="resolve_hostnames" type="checkbox" checked /> 解析 hostname</label>
+                <button class="primary" type="submit">扫描设备</button>
+              </form>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Results</p>
+                <h2>发现结果</h2>
+              </div>
+              <button class="secondary" id="save-results">保存结果</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>hostname</th>
+                    <th>IP</th>
+                    <th>MAC</th>
+                    <th>备注 / 厂商</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="discovery-results"></tbody>
+              </table>
+            </div>
+            <div class="activity-log" id="discover-log"></div>
+          </section>
+        </section>
+
+        <section class="section" id="section-devices">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Library</p>
+                <h2>已保存设备</h2>
+              </div>
+              <div class="inline-actions">
+                <input id="device-filter" placeholder="搜索 hostname / note / IP / MAC" />
+                <button class="secondary" id="reload-devices">刷新</button>
+              </div>
+            </div>
+            <form class="form-grid inline-form" id="device-form">
+              <label>hostname<input name="hostname" placeholder="Printer.local" /></label>
+              <label>IP<input name="ip" placeholder="10.50.50.21" /></label>
+              <label>MAC<input name="mac" placeholder="aa:bb:cc:dd:ee:ff" /></label>
+              <label>备注<input name="note" placeholder="办公室打印机" /></label>
+              <button class="primary" type="submit">保存设备</button>
+            </form>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>hostname</th>
+                    <th>IP</th>
+                    <th>MAC</th>
+                    <th>备注 / 厂商</th>
+                    <th>SSID</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="devices-table"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="section" id="section-mdns">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Bonjour</p>
+                  <h2>mDNS 查询</h2>
+                </div>
+              </div>
+              <form class="form-grid" id="mdns-form">
+                <label>hostname<input name="hostname" placeholder="Printer.local" /></label>
+                <label>instance<input name="instance" placeholder="可选服务实例名" /></label>
+                <label>service types<input name="service_types" placeholder="_ipp._tcp, _ssh._tcp" /></label>
+                <label>domain<input name="domain" value="local" /></label>
+                <label>timeout<input name="timeout" type="number" value="1" min="0.1" step="0.1" /></label>
+                <label class="check"><input name="merge" type="checkbox" /> 合并 TXT</label>
+                <button class="primary" type="submit">查询 mDNS</button>
+              </form>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">TXT</p>
+                  <h2>服务详情</h2>
+                </div>
+              </div>
+              <pre class="result-pre" id="mdns-output">等待查询。</pre>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="section-wifi">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Wi‑Fi</p>
+                  <h2>网络管理</h2>
+                </div>
+                <button class="secondary" id="refresh-wifi">读取列表</button>
+              </div>
+              <form class="form-grid" id="wifi-switch-form">
+                <label>SSID<input name="ssid" placeholder="Example-Student" /></label>
+                <label>密码<input name="password" type="password" placeholder="留空使用已保存凭据" /></label>
+                <label>接口<input name="interface" placeholder="auto / en0" /></label>
+                <label>验证秒<input name="verify_timeout" type="number" value="12" min="1" /></label>
+                <label class="check"><input name="verify" type="checkbox" checked /> 验证切换结果</label>
+                <button class="primary" type="submit">切换 Wi‑Fi</button>
+              </form>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Saved + Nearby</p>
+                  <h2>可用网络</h2>
+                </div>
+              </div>
+              <div class="wifi-lists">
+                <div>
+                  <h3>已保存</h3>
+                  <ul id="wifi-saved"></ul>
+                </div>
+                <div>
+                  <h3>附近</h3>
+                  <ul id="wifi-nearby"></ul>
+                </div>
+                <div>
+                  <h3>可切换</h3>
+                  <ul id="wifi-available"></ul>
+                </div>
+              </div>
+              <div class="activity-log" id="wifi-log"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="section-load">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">ICMP / TCP</p>
+                  <h2>负载测试</h2>
+                </div>
+              </div>
+              <form class="form-grid" id="load-form">
+                <label>目标<input name="target" placeholder="10.50.50.21" required /></label>
+                <label>协议
+                  <select name="protocol">
+                    <option value="icmp">ICMP</option>
+                    <option value="tcp">TCP</option>
+                  </select>
+                </label>
+                <label>端口<input name="tcp_port" type="number" value="5000" min="1" /></label>
+                <label>并发<input name="concurrency" type="number" value="32" min="1" /></label>
+                <label>时长秒<input name="duration" type="number" value="10" min="0" step="0.5" /></label>
+                <label>包数<input name="count" type="number" placeholder="可选" min="1" /></label>
+                <label>超时秒<input name="timeout" type="number" value="1" min="0.1" step="0.1" /></label>
+                <label>负载字节<input name="payload_size" type="number" value="0" min="0" /></label>
+                <label>渐进启动<input name="ramp_up" type="number" value="0.75" min="0" step="0.05" /></label>
+                <label class="check"><input name="tcp_keep_open" type="checkbox" /> TCP 保持连接</label>
+                <button class="primary" type="submit">开始测试</button>
+              </form>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Metrics</p>
+                  <h2>实时结果</h2>
+                </div>
+              </div>
+              <div class="load-metrics" id="load-metrics"></div>
+              <canvas id="load-chart" width="620" height="260"></canvas>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="section-automation">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Rotation</p>
+                  <h2>Wi‑Fi 轮换扫描</h2>
+                </div>
+              </div>
+              <form class="form-grid" id="auto-scan-form">
+                <label>配置路径<input name="wifi_list" placeholder="HypingData/hyping-wifi-rotation.json" /></label>
+                <label>Bettercap 等待秒<input name="bettercap_wait" type="number" value="5" min="0" step="0.5" /></label>
+                <label>预热秒<input name="discovery_warmup" type="number" value="3" min="0" step="0.5" /></label>
+                <label>验证秒<input name="verify_timeout" type="number" value="12" min="1" /></label>
+                <label class="check"><input name="restore_original" type="checkbox" checked /> 结束后恢复原 Wi‑Fi</label>
+                <button class="primary" type="submit">开始轮换扫描</button>
+              </form>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Auto Locate</p>
+                  <h2>自动查找 hostname</h2>
+                </div>
+              </div>
+              <form class="form-grid" id="auto-locate-form">
+                <label>hostname<input name="hostname" placeholder="Daisy-iPad.local" /></label>
+                <label>配置路径<input name="wifi_list" placeholder="HypingData/hyping-wifi-rotation.json" /></label>
+                <label>Bettercap 等待秒<input name="bettercap_wait" type="number" value="5" min="0" step="0.5" /></label>
+                <label class="check"><input name="partial_hostname" type="checkbox" /> 部分匹配</label>
+                <label class="check"><input name="restore_original" type="checkbox" checked /> 恢复原 Wi‑Fi</label>
+                <button class="primary" type="submit">自动查找</button>
+              </form>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Wi‑Fi List</p>
+                <h2>轮换配置</h2>
+              </div>
+              <div class="inline-actions">
+                <button class="secondary" id="add-rotation">添加 SSID</button>
+                <button class="primary" id="save-rotation">保存配置</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>SSID</th><th>密码</th><th>操作</th></tr>
+                </thead>
+                <tbody id="rotation-table"></tbody>
+              </table>
+            </div>
+            <div class="activity-log" id="automation-log"></div>
+          </section>
+        </section>
+
+        <section class="section" id="section-settings">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Config</p>
+                <h2>运行设置</h2>
+              </div>
+              <button class="primary" id="save-config">保存设置</button>
+            </div>
+            <div class="settings-grid">
+              <div>
+                <h3>Bettercap</h3>
+                <label>API 地址<input id="set-bettercap-url" /></label>
+                <label>用户名<input id="set-bettercap-user" /></label>
+                <label>密码<input id="set-bettercap-pass" type="password" /></label>
+                <label>等待秒<input id="set-bettercap-wait" type="number" step="0.5" /></label>
+              </div>
+              <div>
+                <h3>扫描</h3>
+                <label>默认来源
+                  <select id="set-scan-scanner">
+                    <option value="bettercap">Bettercap</option>
+                    <option value="builtin">内置 ARP</option>
+                  </select>
+                </label>
+                <label>默认网段<input id="set-scan-network" /></label>
+                <label>扫描轮数<input id="set-scan-passes" type="number" /></label>
+                <label>批大小<input id="set-scan-batch" type="number" /></label>
+              </div>
+              <div>
+                <h3>负载测试</h3>
+                <label>默认协议
+                  <select id="set-load-protocol">
+                    <option value="icmp">ICMP</option>
+                    <option value="tcp">TCP</option>
+                  </select>
+                </label>
+                <label>TCP 端口<input id="set-load-port" type="number" /></label>
+                <label>并发<input id="set-load-concurrency" type="number" /></label>
+                <label>时长秒<input id="set-load-duration" type="number" step="0.5" /></label>
+              </div>
+            </div>
+            <div class="activity-log" id="settings-log"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+    <div class="toast" id="toast"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

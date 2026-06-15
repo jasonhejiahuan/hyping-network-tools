@@ -651,7 +651,12 @@ def _render(config: LoadTestConfig, stats: LoadTestStats) -> None:
     print(_muted("\n按 Esc 或 Ctrl+C 停止。"))
 
 
-def run_load_test(config: LoadTestConfig, *, live: bool = True) -> dict[str, object]:
+def run_load_test(
+    config: LoadTestConfig,
+    *,
+    live: bool = True,
+    include_series: bool = False,
+) -> dict[str, object]:
     """Run a threaded ICMP/TCP load test and return final statistics."""
 
     _validate_config(config)
@@ -694,4 +699,4 @@ def run_load_test(config: LoadTestConfig, *, live: bool = True) -> dict[str, obj
             _render(config, stats)
             print()
 
-    return dict(stats.snapshot())
+    return dict(stats.snapshot(include_series=include_series))
