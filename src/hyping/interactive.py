@@ -10,6 +10,15 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any
 
+from hyping.auto_wifi_scan import (
+    DEFAULT_WIFI_ROTATION_PATH,
+    AutoWiFiScanError,
+    expand_wifi_rotation_path,
+    find_hostname_with_bettercap_then_wifi_rotation,
+    load_wifi_scan_targets,
+    run_auto_wifi_scan,
+    write_wifi_scan_template,
+)
 from hyping.config import ensure_config
 from hyping.discovery.arp import can_run_active_arp_scan, list_network_devices
 from hyping.discovery.bettercap import (
@@ -297,6 +306,15 @@ def _record_title(record: DeviceRecord) -> str:
     )
 
 
+def _record_hostname(record: DeviceRecord) -> str | None:
+    hostname = record.get("hostname")
+    if not isinstance(hostname, str):
+        return None
+
+    cleaned = hostname.strip().rstrip(".")
+    return cleaned or None
+
+
 def _save_record(store_path: Path, record: DeviceRecord) -> None:
     records = load_device_records(store_path)
     upsert_device_record(records, record)
@@ -377,6 +395,17 @@ def _choose_record(records: list[DeviceRecord], prompt: str) -> DeviceRecord | N
         return None
 
     return records[index]
+
+
+def _choose_saved_hostname_record(records: list[DeviceRecord]) -> DeviceRecord | None:
+    hostname_records = [
+        record for record in records if _record_hostname(record) is not None
+    ]
+    if not hostname_records:
+        print("没有带 hostname 的已保存设备。")
+        return None
+
+    return _choose_record(hostname_records, "输入要使用的保存设备编号")
 
 
 def _located_devices_action_flow(
@@ -655,7 +684,268 @@ def _scan_network_flow(
     return _located_devices_action_flow(store_path, records)
 
 
-def _wifi_flow(config: Mapping[str, Any]) -> None:
+def _auto_wifi_scan_flow(store_path: Path, config: Mapping[str, Any]) -> None:
+    global _NETWORK_INFO_CACHE
+
+    _title("自动轮换 Wi-Fi 扫描")
+
+    bettercap_config = config.get("bettercap", {})
+    wifi_config = config.get("wifi", {})
+    auto_config = config.get("auto_wifi_scan", {})
+
+    wifi_list = expand_wifi_rotation_path(
+        str(auto_config.get("wifi_list", str(DEFAULT_WIFI_ROTATION_PATH)))
+    )
+    api_url = str(bettercap_config.get("url", "http://127.0.0.1:8081"))
+    api_user = str(bettercap_config.get("username", "user"))
+    api_pass = str(bettercap_config.get("password", "pass"))
+    api_timeout = float(bettercap_config.get("api_timeout", 3.0))
+    bettercap_command = str(bettercap_config.get("command", "bettercap"))
+    startup_timeout = float(bettercap_config.get("startup_timeout", 8.0))
+    startup_poll_interval = float(
+        bettercap_config.get("startup_poll_interval", 0.25)
+    )
+    wait = float(bettercap_config.get("wait", 5.0))
+    poll_interval = float(bettercap_config.get("poll_interval", 0.5))
+    discovery_warmup = float(bettercap_config.get("discovery_warmup", 3.0))
+    verify_timeout = float(wifi_config.get("verify_timeout", 12.0))
+    restore_original = bool(auto_config.get("restore_original", True))
+    interface = str(wifi_config.get("interface") or "")
+
+    try:
+        print("将使用这些参数：")
+        print(f"Wi-Fi 轮换配置: {wifi_list}")
+        print(f"实际读取路径: {wifi_list.resolve()}")
+        print(f"设备保存文件: {store_path}")
+        print(f"Wi-Fi 接口: {interface or '自动检测'}")
+        print(f"Bettercap API: {api_url}")
+        print(f"Bettercap 用户名: {api_user}")
+        print(f"持续读取 Bettercap 秒数: {wait}")
+        print(f"net.recon/net.probe 预热秒数: {discovery_warmup}")
+        print(f"切换 Wi-Fi 验证超时秒: {verify_timeout}")
+        print(f"结束后恢复原 Wi-Fi: {'是' if restore_original else '否'}")
+
+        if _yes("是否修改参数", default=False):
+            wifi_list = expand_wifi_rotation_path(
+                _ask("Wi-Fi 轮换配置 JSON/CSV", str(wifi_list))
+            )
+            interface = _ask("Wi-Fi 接口；留空自动检测", interface) or ""
+            api_url = _ask("Bettercap API 地址", api_url)
+            api_user = _ask("Bettercap 用户名", api_user)
+            api_pass = _ask("Bettercap 密码", api_pass)
+            api_timeout = float(_ask("API 超时时间秒", str(api_timeout)))
+            bettercap_command = _ask("bettercap 命令", bettercap_command)
+            startup_timeout = float(
+                _ask("Bettercap API 启动等待秒", str(startup_timeout))
+            )
+            startup_poll_interval = float(
+                _ask("Bettercap API 启动轮询秒", str(startup_poll_interval))
+            )
+            wait = float(_ask("持续读取 Bettercap 秒数", str(wait)))
+            poll_interval = float(_ask("刷新间隔秒", str(poll_interval)))
+            discovery_warmup = float(
+                _ask("net.recon/net.probe 预热秒数", str(discovery_warmup))
+            )
+            verify_timeout = float(_ask("切换 Wi-Fi 验证超时秒", str(verify_timeout)))
+            restore_original = _yes(
+                "结束后是否恢复原 Wi-Fi",
+                default=restore_original,
+            )
+    except ValueError:
+        print("参数格式无效。")
+        return
+
+    if not _is_elevated():
+        print("自动轮换扫描需要 sudo/root 权限。")
+        print("请用 sudo 启动交互式 UI 后再运行此功能。")
+        return
+
+    if not wifi_list.exists():
+        write_wifi_scan_template(wifi_list)
+        print(f"已创建 Wi-Fi 轮换配置模板：{wifi_list}")
+        print(f"实际创建路径：{wifi_list.resolve()}")
+        print("请写入 SSID/password 后重新运行。")
+        return
+
+    try:
+        targets = load_wifi_scan_targets(wifi_list)
+    except AutoWiFiScanError as exc:
+        print(f"读取轮换配置失败：{exc}")
+        return
+
+    print(f"将轮换扫描 {len(targets)} 个 Wi-Fi：")
+    for index, target in enumerate(targets, start=1):
+        password_status = "已配置密码" if target.password else "未配置密码"
+        print(f"{index:>2}. {target.ssid}（{password_status}）")
+
+    if not _yes("开始自动轮换扫描", default=True):
+        return
+
+    client = BettercapClient(api_url, api_user, api_pass, timeout=api_timeout)
+    try:
+        results = run_auto_wifi_scan(
+            targets,
+            client=client,
+            interface=interface or None,
+            bettercap_command=bettercap_command,
+            startup_timeout=startup_timeout,
+            startup_poll_interval=startup_poll_interval,
+            bettercap_wait=wait,
+            bettercap_poll=poll_interval,
+            discovery_warmup=discovery_warmup,
+            verify_timeout=verify_timeout,
+            restore_original=restore_original,
+            store_path=store_path,
+            on_status=lambda message: print(message, flush=True),
+        )
+    except (AutoWiFiScanError, BettercapAPIError, WiFiError) as exc:
+        print(f"自动轮换扫描失败：{exc}")
+        return
+    finally:
+        _NETWORK_INFO_CACHE = None
+
+    print("\n自动轮换扫描完成：")
+    for result in results:
+        if result.error:
+            print(f"- {result.ssid}: 失败，{result.error}")
+        else:
+            print(
+                f"- {result.ssid}: 发现 {len(result.hosts)} 台，"
+                f"写入/更新 {result.saved_count} 条"
+            )
+    print(f"设备保存文件：{store_path}")
+
+
+def _auto_hostname_search_flow(
+    store_path: Path,
+    config: Mapping[str, Any],
+    current: DeviceRecord | None = None,
+) -> DeviceRecord | None:
+    global _NETWORK_INFO_CACHE
+
+    _title("按 hostname 自动查找设备")
+
+    records = load_device_records(store_path)
+    default_hostname = _record_hostname(current) if current is not None else None
+    print(_clip(_current_summary(current), _terminal_width()))
+    if records:
+        print(_muted("输入 saved 可从已保存设备选择 hostname。"))
+
+    hostname = _ask("hostname；输入 saved 选择已保存设备", default_hostname)
+    if hostname.casefold() in {"saved", "save", "已保存", "保存"} or not hostname:
+        try:
+            selected = _choose_saved_hostname_record(records)
+        except BackRequested:
+            return current
+        if selected is None:
+            return current
+        hostname = _record_hostname(selected) or ""
+
+    if not hostname:
+        print("hostname 不能为空。")
+        return current
+
+    partial_hostname = _yes("是否允许 hostname 部分匹配", default=True)
+    bettercap_config = config.get("bettercap", {})
+    wifi_config = config.get("wifi", {})
+    auto_config = config.get("auto_wifi_scan", {})
+
+    wifi_list = expand_wifi_rotation_path(
+        str(auto_config.get("wifi_list", str(DEFAULT_WIFI_ROTATION_PATH)))
+    )
+    api_url = str(bettercap_config.get("url", "http://127.0.0.1:8081"))
+    api_user = str(bettercap_config.get("username", "user"))
+    api_pass = str(bettercap_config.get("password", "pass"))
+    api_timeout = float(bettercap_config.get("api_timeout", 3.0))
+    online_check_timeout = float(
+        bettercap_config.get("online_check_timeout", FAST_API_CHECK_TIMEOUT)
+    )
+    auto_start_api = bool(bettercap_config.get("auto_start_api", True))
+    bettercap_command = str(bettercap_config.get("command", "bettercap"))
+    startup_timeout = float(bettercap_config.get("startup_timeout", 8.0))
+    startup_poll_interval = float(
+        bettercap_config.get("startup_poll_interval", 0.25)
+    )
+    wait = float(bettercap_config.get("wait", 5.0))
+    poll_interval = float(bettercap_config.get("poll_interval", 0.5))
+    discovery_warmup = float(bettercap_config.get("discovery_warmup", 3.0))
+    verify_timeout = float(wifi_config.get("verify_timeout", 12.0))
+    restore_original = bool(auto_config.get("restore_original", True))
+    interface = str(wifi_config.get("interface") or "")
+
+    print("将使用当前 Bettercap 优先查找；未找到时轮换 Wi-Fi。")
+    print(f"Wi-Fi 轮换配置: {wifi_list}")
+    print(f"实际读取路径: {wifi_list.resolve()}")
+    print(f"设备保存文件: {store_path}")
+    print(f"Wi-Fi 接口: {interface or '自动检测'}")
+    print(f"Bettercap API: {api_url}")
+    print(f"API 在线检查超时时间秒: {online_check_timeout}")
+    print(f"API 不在线时 sudo 自动启动 bettercap: {'是' if auto_start_api else '否'}")
+    print(f"持续读取 Bettercap 秒数: {wait}")
+
+    if not wifi_list.exists():
+        write_wifi_scan_template(wifi_list)
+        print(f"已创建 Wi-Fi 轮换配置模板：{wifi_list}")
+        print("请写入 SSID/password 后重新运行。")
+        return current
+
+    try:
+        targets = load_wifi_scan_targets(wifi_list)
+    except AutoWiFiScanError as exc:
+        print(f"读取轮换配置失败：{exc}")
+        return current
+
+    client = BettercapClient(api_url, api_user, api_pass, timeout=api_timeout)
+    try:
+        result = find_hostname_with_bettercap_then_wifi_rotation(
+            hostname,
+            targets,
+            client=client,
+            interface=interface or None,
+            bettercap_command=bettercap_command,
+            auto_start_bettercap_api=auto_start_api,
+            online_check_timeout=online_check_timeout,
+            startup_timeout=startup_timeout,
+            startup_poll_interval=startup_poll_interval,
+            bettercap_wait=wait,
+            bettercap_poll=poll_interval,
+            discovery_warmup=discovery_warmup,
+            verify_timeout=verify_timeout,
+            restore_original=restore_original,
+            partial_hostname=partial_hostname,
+            store_path=store_path,
+            on_status=lambda message: print(message, flush=True),
+        )
+    except (AutoWiFiScanError, BettercapAPIError, WiFiError) as exc:
+        print(f"自动查找失败：{exc}")
+        return current
+    finally:
+        _NETWORK_INFO_CACHE = None
+
+    if result.host is None:
+        print(f"未找到 hostname：{hostname}")
+        if result.scanned_ssids:
+            print("已扫描 Wi-Fi：" + ", ".join(result.scanned_ssids))
+        return current
+
+    print("已找到设备：")
+    found_record = record_from_bettercap_host(result.host)
+    if result.ssid:
+        found_record["ssid"] = result.ssid
+    _show_records([found_record])
+    source = result.ssid or "当前 Wi-Fi / 当前 Bettercap 会话（SSID 未获取）"
+    print(f"SSID：{result.ssid or '未获取'}")
+    print(f"来源：{source}")
+    print(f"写入/更新记录数：{result.saved_count}")
+    print(f"设备保存文件：{store_path}")
+    return found_record
+
+
+def _wifi_flow(
+    store_path: Path,
+    config: Mapping[str, Any],
+    current: DeviceRecord | None = None,
+) -> DeviceRecord | None:
     global _NETWORK_INFO_CACHE
 
     wifi_config = config.get("wifi", {})
@@ -671,13 +961,15 @@ def _wifi_flow(config: Mapping[str, Any]) -> None:
             "  2. 列出已保存 Wi-Fi\n"
             "  3. 扫描附近 Wi-Fi\n"
             "  4. 显示附近可用的已保存 Wi-Fi\n"
-            "  5. 切换到指定 SSID\n"
-            "  6. 返回"
+            "  5. 切换到指定 SSID（可输入密码）\n"
+            "  6. 按 hostname 自动查找（Bettercap 优先）\n"
+            "  7. 自动轮换 Wi-Fi 扫描并保存设备\n"
+            "  8. 返回"
         )
         try:
             choice = _ask("输入编号", "1")
         except BackRequested:
-            return
+            return current
         _clear_screen()
 
         try:
@@ -724,7 +1016,13 @@ def _wifi_flow(config: Mapping[str, Any]) -> None:
                 _NETWORK_INFO_CACHE = None
                 print(f"已连接到 Wi-Fi：{joined or ssid}")
             elif choice == "6":
-                return
+                selected = _auto_hostname_search_flow(store_path, config, current)
+                if selected is not None:
+                    current = selected
+            elif choice == "7":
+                _auto_wifi_scan_flow(store_path, config)
+            elif choice == "8":
+                return current
             else:
                 print("未知选项，请重新输入。")
         except WiFiError as exc:
@@ -1322,7 +1620,7 @@ def run_interactive(
                     _load_test_flow(current, config)
                     _pause()
                 elif choice == "6":
-                    _wifi_flow(config)
+                    current = _wifi_flow(store_path, config, current)
                 elif choice == "r":
                     refresh_network = True
                 elif choice == "7":

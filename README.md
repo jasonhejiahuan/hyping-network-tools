@@ -66,13 +66,13 @@ hyping ui
 4. 首次启动时，程序会自动创建默认配置文件：
 
    ```text
-   ~/.hyping/config.json
+   HypingData/hyping-config.json
    ```
 
    常用设备稍后保存到：
 
    ```text
-   ~/.hyping/devices.json
+   HypingData/hyping-devices.json
    ```
 
 5. 进入主界面后，先看顶部的当前网络信息，确认接口和网段是否正确。例如：
@@ -148,6 +148,12 @@ PYTHONPATH=src python -m hyping.main locate --hostname Ivan --partial-hostname
 PYTHONPATH=src python -m hyping.main ui
 ```
 
+从仓库根目录运行时，也可以省略 `PYTHONPATH`；这对 `sudo` 启动更方便：
+
+```bash
+sudo python3 -m hyping.main ui
+```
+
 列出当前网段下的设备：
 
 ```bash
@@ -171,7 +177,7 @@ http://127.0.0.1:8081
 默认配置文件在：
 
 ```text
-~/.hyping/config.json
+HypingData/hyping-config.json
 ```
 
 第一次启动程序时，如果这个文件不存在，Hyping 会自动创建它。
@@ -219,6 +225,72 @@ PYTHONPATH=src python -m hyping.main wifi switch SCBS-Guest --password Guest2017
 ```
 
 `wifi available` 会列出“附近可见且已经保存”的 Wi-Fi。切换 SSID 使用 macOS 的 `networksetup`；如果省略 `--password`，系统会尝试使用已经保存的凭据。
+
+全自动轮换附近 Wi-Fi 并用 Bettercap 扫描、保存设备：
+
+```bash
+sudo PYTHONPATH=src python -m hyping.main auto-wifi-scan
+```
+
+按 hostname 自动查找设备：先使用当前 Bettercap API 搜索；如果没找到，
+再按 Wi-Fi 轮换配置逐个切换并搜索：
+
+```bash
+PYTHONPATH=src python -m hyping.main auto-locate --hostname DaisytekiiPad.local
+```
+
+也可以从已保存设备里读取 hostname。`--saved` 后面可以接保存设备编号、
+hostname、note、IP 或 MAC；如果设备库里只有一个带 hostname 的保存设备，
+可以只写 `--saved`：
+
+```bash
+PYTHONPATH=src python -m hyping.main auto-locate --saved "Daisy 的 iPad"
+PYTHONPATH=src python -m hyping.main auto-locate --saved 2 --json
+```
+
+找到后会输出设备的 IP、MAC、hostname 和所在 `SSID`；`--json` 会把这些
+字段放到结构化结果里，便于脚本继续处理。
+
+使用 `sudo` 运行时，如果当前 Bettercap API 没有启动，`auto-locate` 会先
+自动启动本机 Bettercap REST API。查找过程中会打印每轮扫描发现的设备数量，
+方便判断是完全没有扫到设备，还是扫到了设备但没有匹配目标 hostname。
+
+如果需要未找到时继续轮换 Wi-Fi，请用 `sudo` 启动：
+
+```bash
+sudo env PYTHONPATH="$PWD/src" "$PWD/.venv-ft/bin/python" -m hyping.main auto-locate \
+  --hostname DaisytekiiPad.local \
+  --partial-hostname
+```
+
+首次运行会创建轮换配置模板：
+
+```text
+HypingData/hyping-wifi-rotation.json
+```
+
+测试时可以写入这 3 个 Wi-Fi：
+
+```json
+{
+  "networks": [
+    {"ssid": "SCBS-Student", "password": null},
+    {"ssid": "SCBS-Teacher", "password": null},
+    {"ssid": "SCBS-Staff", "password": null}
+  ]
+}
+```
+
+也可以使用 CSV：
+
+```csv
+ssid,password
+SCBS-Student,
+SCBS-Teacher,
+SCBS-Staff,
+```
+
+这个命令必须使用 `sudo`。每切换一个 Wi-Fi，Hyping 会先关闭当前 Bettercap 核心，连接目标 SSID，再重新启动 Bettercap REST API 进行扫描；发现的设备会写入 `HypingData/hyping-devices.json`，并记录来源 `ssid`。
 
 运行简单负载测试：
 
@@ -275,7 +347,7 @@ Hyping 会尝试显示当前网络、接口和网段。
 默认保存到：
 
 ```text
-~/.hyping/devices.json
+HypingData/hyping-devices.json
 ```
 
 在交互界面里选择 `管理已保存设备`，可以查看、选择或删除保存的设备。
@@ -359,13 +431,13 @@ If this is your first time running Hyping on this machine, use this sequence:
 4. On first launch, Hyping creates the default config file automatically:
 
    ```text
-   ~/.hyping/config.json
+   HypingData/hyping-config.json
    ```
 
    Saved devices are written later to:
 
    ```text
-   ~/.hyping/devices.json
+   HypingData/hyping-devices.json
    ```
 
 5. In the main screen, first check the current network line and make sure the interface and subnet look right. Example:
@@ -442,6 +514,13 @@ Search the current subnet from the interactive UI:
 PYTHONPATH=src python -m hyping.main ui
 ```
 
+From the repository root, `PYTHONPATH` can be omitted. This is useful when
+starting the UI with `sudo`:
+
+```bash
+sudo python3 -m hyping.main ui
+```
+
 List devices on the current subnet:
 
 ```bash
@@ -470,7 +549,7 @@ mDNS information already collected by Bettercap.
 The config file is:
 
 ```text
-~/.hyping/config.json
+HypingData/hyping-config.json
 ```
 
 Hyping creates it automatically the first time it runs if it does not exist.
@@ -523,6 +602,35 @@ PYTHONPATH=src python -m hyping.main wifi switch SCBS-Guest --password Guest2017
 `wifi available` lists saved Wi-Fi networks that are currently visible nearby.
 Switching uses macOS `networksetup`; if `--password` is omitted, macOS will try
 saved credentials.
+
+Rotate Wi-Fi networks, scan with Bettercap, and save discovered devices:
+
+```bash
+sudo PYTHONPATH=src python -m hyping.main auto-wifi-scan
+```
+
+Find one hostname automatically. Hyping searches the current Bettercap session
+first; if it cannot find the host, it rotates through the configured Wi-Fi list:
+
+```bash
+PYTHONPATH=src python -m hyping.main auto-locate --hostname DaisytekiiPad.local
+```
+
+You can also use a saved device hostname. The `--saved` selector can be a saved
+device number, hostname, note, IP, or MAC:
+
+```bash
+PYTHONPATH=src python -m hyping.main auto-locate --saved "Daisy iPad"
+PYTHONPATH=src python -m hyping.main auto-locate --saved 2 --json
+```
+
+The result includes the device IP, MAC, hostname, and detected Wi-Fi `SSID` when
+available.
+
+When running with `sudo`, `auto-locate` starts the local Bettercap REST API if it
+is not already reachable. It also prints a short per-scan device count so you
+can tell whether Bettercap found no hosts at all or found hosts that did not
+match the target hostname.
 
 Run a quick load test:
 
@@ -585,7 +693,7 @@ On newer macOS versions, the Wi-Fi name may be hidden by the system and shown as
 Saved devices are stored here by default:
 
 ```text
-~/.hyping/devices.json
+HypingData/hyping-devices.json
 ```
 
 Use the UI menu `管理已保存设备` to view, select, or delete saved devices.
