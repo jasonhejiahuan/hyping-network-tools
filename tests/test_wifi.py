@@ -15,12 +15,12 @@ class WiFiTests(unittest.TestCase):
     def test_parse_preferred_wifi_output(self) -> None:
         output = """
 Preferred networks on en0:
-    SCBS-Student
-    SCBS-Guest
+    Example-Student
+    Example-Guest
 """
         self.assertEqual(
             _parse_preferred_wifi_output(output),
-            ["SCBS-Student", "SCBS-Guest"],
+            ["Example-Student", "Example-Guest"],
         )
 
     def test_parse_system_profiler_networks(self) -> None:
@@ -30,17 +30,17 @@ Wi-Fi:
       Interfaces:
         en0:
           Current Network Information:
-            SCBS-Student:
+            Example-Student:
               PHY Mode: 802.11ac
               Channel: 44 (5GHz, 20MHz)
               Security: WPA2 Personal
               Signal / Noise: -50 dBm / -99 dBm
           Other Local Wi-Fi Networks:
-            SCBS-Guest:
+            Example-Guest:
               PHY Mode: 802.11a/n/ac
               Channel: 44 (5GHz, 20MHz)
               Security: WPA2 Personal
-            SCBS-Guest:
+            Example-Guest:
               PHY Mode: 802.11b/g/n/ac
               Channel: 1 (2GHz, 20MHz)
               Security: WPA2 Personal
@@ -48,9 +48,9 @@ Wi-Fi:
         networks = _parse_system_profiler_wifi_networks(output)
 
         self.assertEqual([network.ssid for network in networks], [
-            "SCBS-Student",
-            "SCBS-Guest",
-            "SCBS-Guest",
+            "Example-Student",
+            "Example-Guest",
+            "Example-Guest",
         ])
         self.assertTrue(networks[0].current)
         self.assertEqual(networks[1].channel, "44 (5GHz, 20MHz)")
@@ -59,17 +59,17 @@ Wi-Fi:
     def test_available_saved_wifi_preserves_saved_order(self) -> None:
         with patch(
             "hyping.discovery.wifi.list_saved_wifi_networks",
-            return_value=["SCBS-Student", "SCBS-Staff", "SCBS-Guest"],
+            return_value=["Example-Student", "Example-Staff", "Example-Guest"],
         ), patch(
             "hyping.discovery.wifi.list_nearby_wifi_networks",
             return_value=[
-                WiFiNetwork("SCBS-Guest"),
-                WiFiNetwork("SCBS-Student", current=True),
+                WiFiNetwork("Example-Guest"),
+                WiFiNetwork("Example-Student", current=True),
             ],
         ):
             self.assertEqual(
                 list_available_saved_wifi_networks("en0"),
-                ["SCBS-Student", "SCBS-Guest"],
+                ["Example-Student", "Example-Guest"],
             )
 
     def test_switch_wifi_detects_successful_verified_join(self) -> None:
@@ -78,11 +78,11 @@ Wi-Fi:
             return_value="",
         ) as run, patch(
             "hyping.discovery.wifi.current_wifi_ssid",
-            return_value="SCBS-Guest",
+            return_value="Example-Guest",
         ), patch("hyping.discovery.wifi.time.sleep", lambda _: None):
             self.assertEqual(
-                switch_wifi_network("SCBS-Guest", password="Guest2017"),
-                "SCBS-Guest",
+                switch_wifi_network("Example-Guest", password="example-password"),
+                "Example-Guest",
             )
 
         run.assert_called_once_with(
@@ -90,8 +90,8 @@ Wi-Fi:
                 "networksetup",
                 "-setairportnetwork",
                 "en0",
-                "SCBS-Guest",
-                "Guest2017",
+                "Example-Guest",
+                "example-password",
             ],
             timeout=45.0,
         )
@@ -99,10 +99,10 @@ Wi-Fi:
     def test_switch_wifi_treats_failed_output_as_error(self) -> None:
         with patch("hyping.discovery.wifi.wifi_interface", return_value="en0"), patch(
             "hyping.discovery.wifi._run",
-            return_value="Failed to join network SCBS-Guest.",
+            return_value="Failed to join network Example-Guest.",
         ):
             with self.assertRaises(WiFiError):
-                switch_wifi_network("SCBS-Guest", verify=False)
+                switch_wifi_network("Example-Guest", verify=False)
 
 
 if __name__ == "__main__":
