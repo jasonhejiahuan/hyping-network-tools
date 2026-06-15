@@ -78,7 +78,7 @@ hyping ui
 5. 进入主界面后，先看顶部的当前网络信息，确认接口和网段是否正确。例如：
 
    ```text
-   当前网络：Wi-Fi | SSID: SCBS-Student | 接口: en0 | 网段: 10.50.50.0/24
+   当前网络：Wi-Fi | SSID: Example-Student | 接口: en0 | 网段: 10.50.50.0/24
    ```
 
 6. 第一次找设备，推荐先选择 `1. 通过 hostname/note 查询 IP 和 MAC`。如果你只想列出当前网段设备，可以选择 `2. 列出当前网段设备`。
@@ -221,7 +221,7 @@ PYTHONPATH=src python -m hyping.main wifi current
 PYTHONPATH=src python -m hyping.main wifi saved
 PYTHONPATH=src python -m hyping.main wifi nearby
 PYTHONPATH=src python -m hyping.main wifi available
-PYTHONPATH=src python -m hyping.main wifi switch SCBS-Guest --password Guest2017
+PYTHONPATH=src python -m hyping.main wifi switch Example-Guest --password example-password
 ```
 
 `wifi available` 会列出“附近可见且已经保存”的 Wi-Fi。切换 SSID 使用 macOS 的 `networksetup`；如果省略 `--password`，系统会尝试使用已经保存的凭据。
@@ -274,9 +274,9 @@ HypingData/hyping-wifi-rotation.json
 ```json
 {
   "networks": [
-    {"ssid": "SCBS-Student", "password": null},
-    {"ssid": "SCBS-Teacher", "password": null},
-    {"ssid": "SCBS-Staff", "password": null}
+    {"ssid": "Example-Student", "password": null},
+    {"ssid": "Example-Teacher", "password": null},
+    {"ssid": "Example-Staff", "password": null}
   ]
 }
 ```
@@ -285,9 +285,9 @@ HypingData/hyping-wifi-rotation.json
 
 ```csv
 ssid,password
-SCBS-Student,
-SCBS-Teacher,
-SCBS-Staff,
+Example-Student,
+Example-Teacher,
+Example-Staff,
 ```
 
 这个命令必须使用 `sudo`。每切换一个 Wi-Fi，Hyping 会先关闭当前 Bettercap 核心，连接目标 SSID，再重新启动 Bettercap REST API 进行扫描；发现的设备会写入 `HypingData/hyping-devices.json`，并记录来源 `ssid`。
@@ -443,7 +443,7 @@ If this is your first time running Hyping on this machine, use this sequence:
 5. In the main screen, first check the current network line and make sure the interface and subnet look right. Example:
 
    ```text
-   当前网络：Wi-Fi | SSID: SCBS-Student | 接口: en0 | 网段: 10.50.50.0/24
+   当前网络：Wi-Fi | SSID: Example-Student | 接口: en0 | 网段: 10.50.50.0/24
    ```
 
 6. For your first lookup, choose `1. 通过 hostname/note 查询 IP 和 MAC`. If you only want to list nearby devices on the current subnet, choose `2. 列出当前网段设备`.
@@ -596,7 +596,7 @@ PYTHONPATH=src python -m hyping.main wifi current
 PYTHONPATH=src python -m hyping.main wifi saved
 PYTHONPATH=src python -m hyping.main wifi nearby
 PYTHONPATH=src python -m hyping.main wifi available
-PYTHONPATH=src python -m hyping.main wifi switch SCBS-Guest --password Guest2017
+PYTHONPATH=src python -m hyping.main wifi switch Example-Guest --password example-password
 ```
 
 `wifi available` lists saved Wi-Fi networks that are currently visible nearby.
