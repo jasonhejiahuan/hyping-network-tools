@@ -44,6 +44,7 @@ from hyping.discovery.wifi import (
 from hyping.interactive import run_interactive
 from hyping.loadtest import LoadTestConfig, run_load_test
 from hyping.storage import DEFAULT_STORE_PATH, DeviceRecord, load_device_records
+from hyping.web import run_web
 
 
 def _parse_note_hosts(values: Sequence[str]) -> dict[str, str]:
@@ -832,6 +833,28 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
         help=f"device store JSON path; defaults to {DEFAULT_STORE_PATH}",
     )
 
+    web = subparsers.add_parser(
+        "web",
+        help="start the local Web UI",
+    )
+    web.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="host/interface to bind; defaults to 127.0.0.1",
+    )
+    web.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="port to bind; defaults to 8765",
+    )
+    web.add_argument(
+        "--store",
+        type=Path,
+        default=DEFAULT_STORE_PATH,
+        help=f"device store JSON path; defaults to {DEFAULT_STORE_PATH}",
+    )
+
     load = subparsers.add_parser(
         "load",
         aliases=["ping-load"],
@@ -926,6 +949,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command in {"ui", "interactive"}:
         return run_interactive(args.store, config=config)
+
+    if args.command == "web":
+        return run_web(
+            host=args.host,
+            port=args.port,
+            store_path=args.store,
+            config=config,
+        )
 
     if args.command in {"load", "ping-load"}:
         duration = None if args.duration == 0 else args.duration
