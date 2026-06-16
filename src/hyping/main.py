@@ -839,8 +839,8 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
     )
     web.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="host/interface to bind; defaults to 127.0.0.1",
+        default="localhost",
+        help="host/interface to bind; defaults to localhost",
     )
     web.add_argument(
         "--port",
