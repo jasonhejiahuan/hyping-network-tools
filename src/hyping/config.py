@@ -74,6 +74,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "restore_original": True,
         "create_template": True,
     },
+    "web_auth": {
+        "enabled": True,
+        "login_flow": "redirect",
+        "auth_base_url": "http://localhost:5003",
+        "callback_url": "",
+        "client_id": "passkey-demo-client",
+        "client_secret": "passkey-demo-secret",
+        "server_api_token": "",
+        "username": "",
+        "session_ttl_seconds": 3600,
+        "challenge_ttl_seconds": 300,
+        "request_timeout": 5.0,
+    },
 }
 
 
@@ -83,10 +96,7 @@ def _deep_merge(
 ) -> dict[str, Any]:
     merged = deepcopy(defaults)
     for key, value in override.items():
-        if (
-            isinstance(value, Mapping)
-            and isinstance(merged.get(key), dict)
-        ):
+        if isinstance(value, Mapping) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge(merged[key], value)
         else:
             merged[key] = value
