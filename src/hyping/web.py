@@ -1,17 +1,8 @@
-import base64
-import hashlib
-import hmac
-import http.cookiejar
 import json
 import mimetypes
 import os
-import secrets
-import threading
-import time
 import traceback
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Mapping
 from copy import deepcopy
 from http import HTTPStatus
@@ -74,8 +65,6 @@ from hyping.storage import (
 
 MASKED_SECRET = "••••••"
 STATIC_DIR = Path(__file__).resolve().parent / "web_static"
-AUTH_COOKIE_NAME = "hyping_web_session"
-LOCALHOST_NAMES = {"127.0.0.1", "::1", "[::1]", "0.0.0.0", "localhost"}
 
 
 class HypingWebServer(ThreadingHTTPServer):
@@ -90,21 +79,18 @@ class HypingWebServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_class)
         self.config = dict(config)
         self.store_path = store_path
-        self.auth_challenges: dict[str, dict[str, Any]] = {}
-        self.auth_lock = threading.Lock()
-        self.auth_session_secret = _web_auth_session_secret(self.config)
 
 
 def run_web(
     *,
-    host: str = "localhost",
+    host: str = "127.0.0.1",
     port: int = 8765,
     store_path: Path = DEFAULT_STORE_PATH,
     config: Mapping[str, Any] | None = None,
 ) -> int:
     """Start the local Hyping Web UI."""
 
-    loaded_config = _apply_web_auth_env(config or ensure_config())
+    loaded_config = dict(config or ensure_config())
     server = HypingWebServer(
         (host, port),
         HypingWebHandler,
@@ -112,8 +98,7 @@ def run_web(
         store_path=store_path,
     )
     address, bound_port = server.server_address
-    display_host = _display_web_host(host, str(address))
-    print(f"Hyping Web UI: http://{display_host}:{bound_port}")
+    print(f"Hyping Web UI: http://{address}:{bound_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -130,111 +115,6 @@ def _is_elevated() -> bool:
         return os.getuid() == 0
     except AttributeError:
         return False
-
-
-def _display_web_host(configured_host: str, bound_host: str) -> str:
-    host = configured_host.strip() or bound_host
-    if _hostname_without_port(host).casefold() in LOCALHOST_NAMES:
-        return "localhost"
-    return bound_host if host in {"", "0.0.0.0", "::"} else host
-
-
-def _hostname_without_port(host: str) -> str:
-    value = host.strip()
-    if value.startswith("["):
-        end = value.find("]")
-        return value[: end + 1] if end != -1 else value
-    if value.count(":") == 1:
-        return value.rsplit(":", 1)[0]
-    return value
-
-
-def _canonicalize_loopback_host(host: str) -> str:
-    value = host.strip()
-    if not value:
-        return value
-
-    if value.startswith("["):
-        end = value.find("]")
-        hostname = value[: end + 1] if end != -1 else value
-        port = value[end + 1 :] if end != -1 else ""
-    elif value.count(":") == 1:
-        hostname, port_value = value.rsplit(":", 1)
-        port = f":{port_value}"
-    else:
-        hostname = value
-        port = ""
-
-    if hostname.casefold() in LOCALHOST_NAMES:
-        return f"localhost{port}"
-    return value
-
-
-def _env_bool(name: str, default: bool | None = None) -> bool | None:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    normalized = value.strip().casefold()
-    if normalized in {"1", "true", "yes", "y", "on", "是"}:
-        return True
-    if normalized in {"0", "false", "no", "n", "off", "否"}:
-        return False
-    return default
-
-
-def _env_float(name: str, default: float | None = None) -> float | None:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-def _apply_web_auth_env(config: Mapping[str, Any]) -> dict[str, Any]:
-    merged = deepcopy(dict(config))
-    web_auth = merged.get("web_auth")
-    if not isinstance(web_auth, dict):
-        web_auth = {}
-        merged["web_auth"] = web_auth
-
-    enabled = _env_bool("HYPING_WEB_AUTH_ENABLED")
-    if enabled is not None:
-        web_auth["enabled"] = enabled
-
-    env_map = {
-        "HYPING_PASSKEY_AUTH_FLOW": "login_flow",
-        "HYPING_PASSKEY_AUTH_BASE_URL": "auth_base_url",
-        "HYPING_PASSKEY_AUTH_CALLBACK_URL": "callback_url",
-        "HYPING_PASSKEY_AUTH_CLIENT_ID": "client_id",
-        "HYPING_PASSKEY_AUTH_CLIENT_SECRET": "client_secret",
-        "HYPING_PASSKEY_AUTH_SERVER_API_TOKEN": "server_api_token",
-        "HYPING_PASSKEY_AUTH_USERNAME": "username",
-        "HYPING_WEB_AUTH_SESSION_SECRET": "session_secret",
-    }
-    for env_name, key in env_map.items():
-        value = os.environ.get(env_name)
-        if value is not None:
-            web_auth[key] = value
-
-    for env_name, key in {
-        "HYPING_WEB_AUTH_SESSION_TTL_SECONDS": "session_ttl_seconds",
-        "HYPING_WEB_AUTH_CHALLENGE_TTL_SECONDS": "challenge_ttl_seconds",
-        "HYPING_PASSKEY_AUTH_REQUEST_TIMEOUT": "request_timeout",
-    }.items():
-        value = _env_float(env_name)
-        if value is not None:
-            web_auth[key] = value
-
-    return merged
-
-
-def _load_runtime_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    config = ensure_config()
-    if overrides:
-        config = _deep_merge(config, overrides)
-    return _apply_web_auth_env(config)
 
 
 def _deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
@@ -254,17 +134,6 @@ def _redact_config(config: Mapping[str, Any]) -> dict[str, Any]:
         password = bettercap.get("password")
         bettercap["password"] = MASKED_SECRET if password else ""
         bettercap["password_saved"] = bool(password)
-    web_auth = redacted.get("web_auth")
-    if isinstance(web_auth, dict):
-        client_secret = web_auth.get("client_secret")
-        token = web_auth.get("server_api_token")
-        session_secret = web_auth.get("session_secret")
-        web_auth["client_secret"] = MASKED_SECRET if client_secret else ""
-        web_auth["client_secret_saved"] = bool(client_secret)
-        web_auth["server_api_token"] = MASKED_SECRET if token else ""
-        web_auth["server_api_token_saved"] = bool(token)
-        web_auth["session_secret"] = MASKED_SECRET if session_secret else ""
-        web_auth["session_secret_saved"] = bool(session_secret)
     return redacted
 
 
@@ -310,228 +179,6 @@ def _bool_value(value: object, default: bool) -> bool:
         if normalized in {"0", "false", "no", "n", "off", "否"}:
             return False
     return default
-
-
-def _web_auth_config(config: Mapping[str, Any]) -> dict[str, Any]:
-    web_auth = config.get("web_auth", {})
-    return dict(web_auth) if isinstance(web_auth, Mapping) else {}
-
-
-def _web_auth_enabled(config: Mapping[str, Any]) -> bool:
-    return _bool_value(_web_auth_config(config).get("enabled"), False)
-
-
-def _web_auth_login_flow(config: Mapping[str, Any]) -> str:
-    flow = str(_web_auth_config(config).get("login_flow", "redirect")).casefold()
-    return flow if flow in {"redirect", "proxy"} else "redirect"
-
-
-def _web_auth_session_secret(config: Mapping[str, Any]) -> str:
-    web_auth = _web_auth_config(config)
-    configured = _clean_str(web_auth.get("session_secret"))
-    return configured or secrets.token_urlsafe(32)
-
-
-def _base64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
-
-
-def _base64url_decode(value: str) -> bytes:
-    padding = "=" * ((4 - (len(value) % 4)) % 4)
-    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
-
-
-def _sign_auth_payload(payload: Mapping[str, Any], secret: str) -> str:
-    data = json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    encoded = _base64url_encode(data)
-    digest = hmac.new(
-        secret.encode("utf-8"),
-        encoded.encode("ascii"),
-        hashlib.sha256,
-    ).digest()
-    return f"{encoded}.{_base64url_encode(digest)}"
-
-
-def _verify_auth_payload(token: str, secret: str) -> dict[str, Any] | None:
-    if "." not in token:
-        return None
-    encoded, signature = token.rsplit(".", 1)
-    expected = _base64url_encode(
-        hmac.new(
-            secret.encode("utf-8"),
-            encoded.encode("ascii"),
-            hashlib.sha256,
-        ).digest()
-    )
-    if not hmac.compare_digest(signature, expected):
-        return None
-    try:
-        payload = json.loads(_base64url_decode(encoded).decode("utf-8"))
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if _float_value(payload.get("exp"), 0) < time.time():
-        return None
-    return payload
-
-
-def _cookie_value(cookie_header: str, name: str) -> str | None:
-    for item in cookie_header.split(";"):
-        if "=" not in item:
-            continue
-        key, value = item.strip().split("=", 1)
-        if key == name:
-            return value
-    return None
-
-
-def _auth_user_from_headers(
-    headers: Mapping[str, str],
-    *,
-    secret: str,
-) -> dict[str, Any] | None:
-    token = _cookie_value(headers.get("Cookie", ""), AUTH_COOKIE_NAME)
-    if not token:
-        return None
-    payload = _verify_auth_payload(token, secret)
-    if payload is None:
-        return None
-    user = payload.get("user")
-    return dict(user) if isinstance(user, Mapping) else None
-
-
-def _auth_cookie(
-    token: str,
-    *,
-    ttl_seconds: int,
-    secure: bool,
-) -> str:
-    parts = [
-        f"{AUTH_COOKIE_NAME}={token}",
-        "Path=/",
-        "HttpOnly",
-        "SameSite=Lax",
-        f"Max-Age={ttl_seconds}",
-    ]
-    if secure:
-        parts.append("Secure")
-    return "; ".join(parts)
-
-
-def _expired_auth_cookie() -> str:
-    return (
-        f"{AUTH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; "
-        "Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
-    )
-
-
-def _cookie_header_from_jar(cookie_jar: http.cookiejar.CookieJar) -> str:
-    values = []
-    for cookie in cookie_jar:
-        if cookie.is_expired():
-            continue
-        values.append(f"{cookie.name}={cookie.value}")
-    return "; ".join(values)
-
-
-def _passkey_auth_url(auth_config: Mapping[str, Any], path: str) -> str:
-    base_url = _clean_str(auth_config.get("auth_base_url"))
-    if base_url is None:
-        msg = "Passkey-Auth 地址未配置"
-        raise ValueError(msg)
-    return f"{base_url.rstrip('/')}{path}"
-
-
-def _read_json_response(response) -> dict[str, Any]:
-    raw = response.read()
-    if not raw:
-        return {}
-    data = json.loads(raw.decode("utf-8"))
-    if isinstance(data, dict):
-        return data
-    msg = "Passkey-Auth 返回了非对象 JSON"
-    raise ValueError(msg)
-
-
-def _passkey_auth_error(exc: urllib.error.HTTPError) -> ValueError:
-    try:
-        payload = json.loads(exc.read().decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        payload = {}
-    error = payload.get("error") if isinstance(payload, dict) else None
-    description = (
-        payload.get("error_description") if isinstance(payload, dict) else None
-    )
-    detail = description or error or exc.reason or exc.code
-    return ValueError(f"Passkey-Auth 请求失败：{detail}")
-
-
-def _passkey_auth_json_request(
-    auth_config: Mapping[str, Any],
-    path: str,
-    body: Mapping[str, Any],
-    *,
-    cookie_jar: http.cookiejar.CookieJar | None = None,
-    bearer_token: str | None = None,
-) -> dict[str, Any]:
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        _passkey_auth_url(auth_config, path),
-        data=data,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            **({"Authorization": f"Bearer {bearer_token}"} if bearer_token else {}),
-        },
-        method="POST",
-    )
-    timeout = _float_value(auth_config.get("request_timeout"), 5.0)
-    try:
-        if cookie_jar is None:
-            response_context = urllib.request.urlopen(request, timeout=timeout)
-        else:
-            opener = urllib.request.build_opener(
-                urllib.request.HTTPCookieProcessor(cookie_jar)
-            )
-            response_context = opener.open(request, timeout=timeout)
-        with response_context as response:
-            return _read_json_response(response)
-    except urllib.error.HTTPError as exc:
-        raise _passkey_auth_error(exc) from exc
-    except urllib.error.URLError as exc:
-        msg = f"无法连接 Passkey-Auth：{exc.reason}"
-        raise ValueError(msg) from exc
-
-
-def _passkey_auth_get_json_request(
-    auth_config: Mapping[str, Any],
-    path: str,
-    *,
-    bearer_token: str | None = None,
-) -> dict[str, Any]:
-    request = urllib.request.Request(
-        _passkey_auth_url(auth_config, path),
-        headers={
-            "Accept": "application/json",
-            **({"Authorization": f"Bearer {bearer_token}"} if bearer_token else {}),
-        },
-        method="GET",
-    )
-    timeout = _float_value(auth_config.get("request_timeout"), 5.0)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return _read_json_response(response)
-    except urllib.error.HTTPError as exc:
-        raise _passkey_auth_error(exc) from exc
-    except urllib.error.URLError as exc:
-        msg = f"无法连接 Passkey-Auth：{exc.reason}"
-        raise ValueError(msg) from exc
 
 
 def _device_to_record(device: Device) -> DeviceRecord:
@@ -656,9 +303,6 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         try:
             if parsed.path.startswith("/api/"):
-                if self._requires_auth(parsed.path):
-                    self._send_auth_required()
-                    return
                 self._handle_api_get(parsed)
                 return
             self._serve_static(parsed.path)
@@ -668,9 +312,6 @@ class HypingWebHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         try:
-            if parsed.path.startswith("/api/") and self._requires_auth(parsed.path):
-                self._send_auth_required()
-                return
             body = self._read_json_body()
             self._handle_api_post(parsed, body)
         except Exception as exc:
@@ -691,35 +332,14 @@ class HypingWebHandler(BaseHTTPRequestHandler):
             raise ValueError(msg)
         return value
 
-    def _send_json(
-        self,
-        value: object,
-        *,
-        status: int = HTTPStatus.OK,
-        headers: Mapping[str, str] | None = None,
-    ) -> None:
+    def _send_json(self, value: object, *, status: int = HTTPStatus.OK) -> None:
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        for key, header_value in (headers or {}).items():
-            self.send_header(key, header_value)
         self.end_headers()
         self.wfile.write(body)
-
-    def _send_redirect(
-        self,
-        location: str,
-        *,
-        headers: Mapping[str, str] | None = None,
-    ) -> None:
-        self.send_response(HTTPStatus.SEE_OTHER)
-        self.send_header("Location", location)
-        self.send_header("Cache-Control", "no-store")
-        for key, header_value in (headers or {}).items():
-            self.send_header(key, header_value)
-        self.end_headers()
 
     def _send_error(self, exc: Exception) -> None:
         status = HTTPStatus.BAD_REQUEST
@@ -734,44 +354,11 @@ class HypingWebHandler(BaseHTTPRequestHandler):
             payload["traceback"] = traceback.format_exc()
         self._send_json(payload, status=status)
 
-    def _current_auth_user(self) -> dict[str, Any] | None:
-        return _auth_user_from_headers(
-            self.headers,
-            secret=self.server.auth_session_secret,
-        )
-
-    def _requires_auth(self, path: str) -> bool:
-        if not _web_auth_enabled(self.server.config):
-            return False
-        if path.startswith("/api/auth/"):
-            return False
-        return self._current_auth_user() is None
-
-    def _send_auth_required(self) -> None:
-        self._send_json(
-            {
-                "ok": False,
-                "error": "请先使用 Passkey 登录",
-                "type": "auth_required",
-                "authRequired": True,
-            },
-            status=HTTPStatus.UNAUTHORIZED,
-        )
-
     def _handle_api_get(self, parsed: urllib.parse.ParseResult) -> None:
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
-        if path == "/api/auth/status":
-            self._send_json(self._auth_status())
-            return
-        if path == "/api/auth/login":
-            self._auth_login(query)
-            return
-        if path == "/api/auth/callback":
-            self._auth_callback(query)
-            return
         if path == "/api/status":
-            self.server.config = _load_runtime_config(self.server.config)
+            self.server.config = ensure_config()
             self._send_json(
                 {
                     "ok": True,
@@ -790,7 +377,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/api/config":
-            self.server.config = _load_runtime_config(self.server.config)
+            self.server.config = ensure_config()
             self._send_json(
                 {
                     "ok": True,
@@ -849,9 +436,6 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         body: dict[str, Any],
     ) -> None:
         routes = {
-            "/api/auth/options": self._auth_options,
-            "/api/auth/verify": self._auth_verify,
-            "/api/auth/logout": self._auth_logout,
             "/api/scan": self._scan,
             "/api/locate": self._locate,
             "/api/devices/save": self._save_devices,
@@ -867,12 +451,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         handler = routes.get(parsed.path)
         if handler is None:
             raise FileNotFoundError(parsed.path)
-        payload = dict(handler(body))
-        headers = payload.pop("_headers", None)
-        self._send_json(
-            payload,
-            headers=headers if isinstance(headers, Mapping) else None,
-        )
+        self._send_json(handler(body))
 
     def _serve_static(self, path: str) -> None:
         if path in {"", "/"}:
@@ -898,361 +477,8 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _auth_status(self) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
-        auth_config = _web_auth_config(self.server.config)
-        enabled = _web_auth_enabled(self.server.config)
-        user = self._current_auth_user()
-        login_flow = _web_auth_login_flow(self.server.config)
-        return {
-            "ok": True,
-            "enabled": enabled,
-            "authenticated": not enabled or user is not None,
-            "user": user,
-            "auth": {
-                "provider": "Passkey-Auth",
-                "authBaseUrl": auth_config.get("auth_base_url", ""),
-                "username": auth_config.get("username", ""),
-                "loginFlow": login_flow,
-                "loginUrl": "/api/auth/login" if login_flow == "redirect" else "",
-                "callbackUrl": self._auth_callback_url(auth_config),
-            },
-        }
-
-    def _auth_login(self, query: Mapping[str, list[str]]) -> None:
-        self.server.config = _load_runtime_config(self.server.config)
-        if not _web_auth_enabled(self.server.config):
-            self._send_redirect(self._safe_next_path(query.get("next", [""])[0]))
-            return
-        if _web_auth_login_flow(self.server.config) != "redirect":
-            msg = "当前 WebUI 认证不是 redirect flow"
-            raise ValueError(msg)
-
-        auth_config = _web_auth_config(self.server.config)
-        client_id = _clean_str(auth_config.get("client_id"))
-        if client_id is None:
-            msg = "Passkey-Auth client_id 未配置"
-            raise ValueError(msg)
-
-        now = int(time.time())
-        state = _sign_auth_payload(
-            {
-                "iat": now,
-                "exp": now
-                + int(_float_value(auth_config.get("challenge_ttl_seconds"), 300.0)),
-                "nonce": secrets.token_urlsafe(16),
-                "next": self._safe_next_path(query.get("next", [""])[0]),
-            },
-            self.server.auth_session_secret,
-        )
-        params = urllib.parse.urlencode(
-            {
-                "response_type": "code",
-                "client_id": client_id,
-                "redirect_uri": self._auth_callback_url(auth_config),
-                "state": state,
-            }
-        )
-        self._send_redirect(
-            _passkey_auth_url(auth_config, f"/oauth/authorize?{params}")
-        )
-
-    def _auth_callback(self, query: Mapping[str, list[str]]) -> None:
-        self.server.config = _load_runtime_config(self.server.config)
-        if not _web_auth_enabled(self.server.config):
-            self._send_redirect("/")
-            return
-
-        state = query.get("state", [""])[0]
-        state_payload = _verify_auth_payload(state, self.server.auth_session_secret)
-        if state_payload is None:
-            self._send_redirect("/?auth_error=invalid_state")
-            return
-
-        next_path = self._safe_next_path(str(state_payload.get("next") or "/"))
-        error = query.get("error", [""])[0]
-        if error:
-            self._send_redirect(
-                self._url_with_params(next_path, {"auth_error": error})
-            )
-            return
-
-        code = query.get("code", [""])[0]
-        if not code:
-            self._send_redirect(
-                self._url_with_params(next_path, {"auth_error": "missing_code"})
-            )
-            return
-
-        try:
-            user = self._exchange_oauth_code_for_user(code)
-        except ValueError as exc:
-            self._send_redirect(
-                self._url_with_params(
-                    next_path,
-                    {"auth_error": str(exc) or "oauth_failed"},
-                )
-            )
-            return
-
-        token, ttl_seconds = self._issue_auth_session(user)
-        self._send_redirect(
-            self._url_with_params(next_path, {"auth": "success"}),
-            headers={
-                "Set-Cookie": _auth_cookie(
-                    token,
-                    ttl_seconds=ttl_seconds,
-                    secure=self._request_is_secure(),
-                )
-            },
-        )
-
-    def _auth_options(self, body: dict[str, Any]) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
-        auth_config = _web_auth_config(self.server.config)
-        if not _web_auth_enabled(self.server.config):
-            return {"ok": True, "enabled": False, "authenticated": True}
-
-        cookie_jar = http.cookiejar.CookieJar()
-        username = _clean_str(body.get("username"))
-        if username is None:
-            username = _clean_str(auth_config.get("username")) or ""
-        data = _passkey_auth_json_request(
-            auth_config,
-            "/api/login/options",
-            {"username": username},
-            cookie_jar=cookie_jar,
-        )
-        public_key = data.get("publicKey")
-        if not isinstance(public_key, Mapping):
-            msg = "Passkey-Auth 没有返回 challenge"
-            raise ValueError(msg)
-
-        challenge_id = secrets.token_urlsafe(24)
-        expires_at = time.time() + _float_value(
-            auth_config.get("challenge_ttl_seconds"),
-            300.0,
-        )
-        with self.server.auth_lock:
-            self._prune_auth_challenges_locked()
-            self.server.auth_challenges[challenge_id] = {
-                "cookie_jar": cookie_jar,
-                "expires_at": expires_at,
-                "username": username,
-            }
-
-        return {
-            "ok": True,
-            "enabled": True,
-            "challengeId": challenge_id,
-            "publicKey": public_key,
-        }
-
-    def _auth_verify(self, body: dict[str, Any]) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
-        auth_config = _web_auth_config(self.server.config)
-        if not _web_auth_enabled(self.server.config):
-            return {"ok": True, "enabled": False, "authenticated": True}
-
-        challenge_id = _clean_str(body.get("challengeId"))
-        if challenge_id is None:
-            msg = "challengeId 不能为空"
-            raise ValueError(msg)
-
-        with self.server.auth_lock:
-            self._prune_auth_challenges_locked()
-            challenge = self.server.auth_challenges.pop(challenge_id, None)
-        if not challenge:
-            msg = "登录 challenge 已过期，请重新开始"
-            raise ValueError(msg)
-
-        credential = body.get("credential")
-        if not isinstance(credential, Mapping):
-            msg = "credential 不能为空"
-            raise ValueError(msg)
-
-        cookie_jar = challenge["cookie_jar"]
-        _passkey_auth_json_request(
-            auth_config,
-            "/api/login/verify",
-            {"credential": credential},
-            cookie_jar=cookie_jar,
-        )
-        user = self._verify_passkey_auth_session(auth_config, cookie_jar)
-        token, ttl_seconds = self._issue_auth_session(user)
-        response = {
-            "ok": True,
-            "enabled": True,
-            "authenticated": True,
-            "user": user,
-        }
-        response["_headers"] = {
-            "Set-Cookie": _auth_cookie(
-                token,
-                ttl_seconds=ttl_seconds,
-                secure=self._request_is_secure(),
-            )
-        }
-        return response
-
-    def _auth_logout(self, body: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "ok": True,
-            "authenticated": False,
-            "_headers": {"Set-Cookie": _expired_auth_cookie()},
-        }
-
-    def _verify_passkey_auth_session(
-        self,
-        auth_config: Mapping[str, Any],
-        cookie_jar: http.cookiejar.CookieJar,
-    ) -> dict[str, Any]:
-        token = _clean_str(auth_config.get("server_api_token"))
-        if token is None:
-            msg = "Passkey-Auth server_api_token 未配置"
-            raise ValueError(msg)
-
-        cookie_header = _cookie_header_from_jar(cookie_jar)
-        data = _passkey_auth_json_request(
-            auth_config,
-            "/api/server/session/verify",
-            {"sessionCookie": cookie_header},
-            bearer_token=token,
-        )
-        if not data.get("authenticated"):
-            msg = "Passkey-Auth 未确认登录状态"
-            raise ValueError(msg)
-        user = data.get("user")
-        if not isinstance(user, Mapping):
-            msg = "Passkey-Auth 没有返回用户信息"
-            raise ValueError(msg)
-        return {
-            "sub": str(user.get("sub") or ""),
-            "username": str(user.get("username") or ""),
-            "id": user.get("id"),
-            "createdAt": user.get("createdAt"),
-        }
-
-    def _exchange_oauth_code_for_user(self, code: str) -> dict[str, Any]:
-        auth_config = _web_auth_config(self.server.config)
-        client_id = _clean_str(auth_config.get("client_id"))
-        client_secret = _clean_str(auth_config.get("client_secret"))
-        if client_id is None or client_secret is None:
-            msg = "Passkey-Auth OAuth client 未配置"
-            raise ValueError(msg)
-
-        token_data = _passkey_auth_json_request(
-            auth_config,
-            "/oauth/token",
-            {
-                "grant_type": "authorization_code",
-                "code": code,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": self._auth_callback_url(auth_config),
-            },
-        )
-        user = token_data.get("user")
-        if not isinstance(user, Mapping):
-            access_token = _clean_str(token_data.get("access_token"))
-            if access_token:
-                user = _passkey_auth_get_json_request(
-                    auth_config,
-                    "/oauth/userinfo",
-                    bearer_token=access_token,
-                )
-        if not isinstance(user, Mapping):
-            msg = "Passkey-Auth 没有返回用户信息"
-            raise ValueError(msg)
-        return {
-            "sub": str(user.get("sub") or ""),
-            "username": str(user.get("username") or ""),
-            "id": user.get("id"),
-            "createdAt": user.get("createdAt"),
-        }
-
-    def _issue_auth_session(self, user: Mapping[str, Any]) -> tuple[str, int]:
-        auth_config = _web_auth_config(self.server.config)
-        ttl_seconds = max(
-            60,
-            int(_float_value(auth_config.get("session_ttl_seconds"), 3600.0)),
-        )
-        now = int(time.time())
-        token = _sign_auth_payload(
-            {
-                "iat": now,
-                "exp": now + ttl_seconds,
-                "user": dict(user),
-            },
-            self.server.auth_session_secret,
-        )
-        return token, ttl_seconds
-
-    def _auth_callback_url(self, auth_config: Mapping[str, Any]) -> str:
-        return _clean_str(auth_config.get("callback_url")) or self._external_url(
-            "/api/auth/callback"
-        )
-
-    def _external_url(self, path: str) -> str:
-        return f"{self._request_origin()}{path}"
-
-    def _request_origin(self) -> str:
-        forwarded_proto = self.headers.get("X-Forwarded-Proto", "")
-        scheme = (
-            forwarded_proto.split(",", 1)[0].strip()
-            if forwarded_proto
-            else "https"
-            if self._request_is_secure()
-            else "http"
-        )
-        forwarded_host = self.headers.get("X-Forwarded-Host", "")
-        host = _canonicalize_loopback_host(
-            forwarded_host.split(",", 1)[0].strip()
-            or self.headers.get("Host", "")
-            or f"{self.server.server_address[0]}:{self.server.server_address[1]}"
-        )
-        return f"{scheme}://{host}"
-
-    def _request_is_secure(self) -> bool:
-        forwarded_proto = self.headers.get("X-Forwarded-Proto", "")
-        if forwarded_proto:
-            return forwarded_proto.split(",", 1)[0].strip().casefold() == "https"
-        return False
-
-    def _safe_next_path(self, value: str | None) -> str:
-        if not value:
-            return "/"
-        parsed = urllib.parse.urlsplit(value)
-        if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
-            return "/"
-        return urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
-
-    def _url_with_params(self, path: str, params: Mapping[str, str]) -> str:
-        parsed = urllib.parse.urlsplit(path)
-        query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-        query.update({key: value for key, value in params.items() if value})
-        return urllib.parse.urlunsplit(
-            (
-                "",
-                "",
-                parsed.path or "/",
-                urllib.parse.urlencode(query),
-                "",
-            )
-        )
-
-    def _prune_auth_challenges_locked(self) -> None:
-        now = time.time()
-        expired = [
-            challenge_id
-            for challenge_id, challenge in self.server.auth_challenges.items()
-            if _float_value(challenge.get("expires_at"), 0.0) < now
-        ]
-        for challenge_id in expired:
-            self.server.auth_challenges.pop(challenge_id, None)
-
     def _scan(self, body: dict[str, Any]) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
+        self.server.config = ensure_config()
         config = self.server.config
         scan_config = config.get("scan", {})
         scan_config = scan_config if isinstance(scan_config, Mapping) else {}
@@ -1367,7 +593,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         }
 
     def _locate(self, body: dict[str, Any]) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
+        self.server.config = ensure_config()
         config = self.server.config
         locate_config = config.get("locate", {})
         locate_config = locate_config if isinstance(locate_config, Mapping) else {}
@@ -1463,7 +689,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         return {"ok": True, "removed": removed, "devices": records}
 
     def _mdns(self, body: dict[str, Any]) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
+        self.server.config = ensure_config()
         mdns_config = self.server.config.get("mdns", {})
         mdns_config = mdns_config if isinstance(mdns_config, Mapping) else {}
         service_types = body.get("service_types")
@@ -1539,7 +765,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         return {"ok": True, "ssid": result or ssid}
 
     def _load_test(self, body: dict[str, Any]) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
+        self.server.config = ensure_config()
         load_config = self.server.config.get("load", {})
         load_config = load_config if isinstance(load_config, Mapping) else {}
         duration_value = body.get("duration", load_config.get("duration", 10.0))
@@ -1586,7 +812,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         return {"ok": True, "summary": summary}
 
     def _auto_wifi_scan(self, body: dict[str, Any]) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
+        self.server.config = ensure_config()
         config = self.server.config
         bettercap = config.get("bettercap", {})
         bettercap = bettercap if isinstance(bettercap, Mapping) else {}
@@ -1675,7 +901,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         }
 
     def _auto_locate(self, body: dict[str, Any]) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
+        self.server.config = ensure_config()
         config = self.server.config
         bettercap = config.get("bettercap", {})
         bettercap = bettercap if isinstance(bettercap, Mapping) else {}
@@ -1793,23 +1019,12 @@ class HypingWebHandler(BaseHTTPRequestHandler):
                 old_bettercap = current.get("bettercap", {})
                 if isinstance(old_bettercap, Mapping):
                     bettercap["password"] = old_bettercap.get("password", "")
-        web_auth = merged.get("web_auth")
-        incoming_web_auth = (
-            incoming.get("web_auth") if isinstance(incoming, Mapping) else None
-        )
-        if isinstance(web_auth, dict) and isinstance(incoming_web_auth, Mapping):
-            for key in ("client_secret", "server_api_token", "session_secret"):
-                value = incoming_web_auth.get(key)
-                if value in {"", MASKED_SECRET, "******", "********"}:
-                    old_web_auth = current.get("web_auth", {})
-                    if isinstance(old_web_auth, Mapping):
-                        web_auth[key] = old_web_auth.get(key, "")
         save_config(merged)
-        self.server.config = _apply_web_auth_env(merged)
-        return {"ok": True, "config": _redact_config(self.server.config)}
+        self.server.config = merged
+        return {"ok": True, "config": _redact_config(merged)}
 
     def _load_wifi_rotation(self) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
+        self.server.config = ensure_config()
         auto_config = self.server.config.get("auto_wifi_scan", {})
         auto_config = auto_config if isinstance(auto_config, Mapping) else {}
         path = expand_wifi_rotation_path(
@@ -1833,7 +1048,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         }
 
     def _save_wifi_rotation(self, body: dict[str, Any]) -> dict[str, Any]:
-        self.server.config = _load_runtime_config(self.server.config)
+        self.server.config = ensure_config()
         auto_config = self.server.config.get("auto_wifi_scan", {})
         auto_config = auto_config if isinstance(auto_config, Mapping) else {}
         path = expand_wifi_rotation_path(

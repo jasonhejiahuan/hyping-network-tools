@@ -30,10 +30,6 @@ body {
   font-size: 14px;
 }
 
-body.auth-locked {
-  overflow: hidden;
-}
-
 button,
 input,
 select {
@@ -42,117 +38,6 @@ select {
 
 button {
   cursor: pointer;
-}
-
-.auth-gate {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
-  display: grid;
-  place-items: center;
-  padding: 28px;
-  background:
-    linear-gradient(135deg, rgba(19, 128, 124, 0.12), transparent 32%),
-    linear-gradient(315deg, rgba(197, 107, 39, 0.14), transparent 34%),
-    var(--bg);
-}
-
-.auth-gate[hidden] {
-  display: none;
-}
-
-.auth-card {
-  display: grid;
-  width: min(440px, 100%);
-  gap: 22px;
-  padding: 26px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 24px 80px rgba(20, 28, 26, 0.16);
-}
-
-.auth-brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.auth-brand strong,
-.auth-brand span {
-  display: block;
-}
-
-.auth-brand span,
-.auth-copy p,
-.auth-meta {
-  color: var(--muted);
-}
-
-.auth-copy {
-  display: grid;
-  gap: 8px;
-}
-
-.auth-copy h1 {
-  font-size: 30px;
-}
-
-.auth-copy p {
-  margin: 0;
-  line-height: 1.7;
-}
-
-.auth-form {
-  display: grid;
-  gap: 12px;
-}
-
-.auth-form[data-flow="redirect"] label {
-  display: none;
-}
-
-.auth-status {
-  min-height: 42px;
-  margin: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #fbfbf8;
-  color: var(--muted);
-  line-height: 1.5;
-}
-
-.auth-status[data-kind="success"] {
-  border-color: rgba(47, 143, 91, 0.36);
-  color: var(--green);
-}
-
-.auth-status[data-kind="error"] {
-  border-color: rgba(184, 75, 69, 0.36);
-  color: var(--red);
-}
-
-.auth-meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding-top: 2px;
-  font-size: 12px;
-}
-
-.auth-meta strong {
-  overflow: hidden;
-  max-width: 250px;
-  color: var(--ink);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-body.auth-locked .app-shell {
-  filter: blur(8px);
-  pointer-events: none;
-  user-select: none;
 }
 
 .app-shell {
@@ -342,14 +227,7 @@ h3 {
 
 .top-actions {
   display: flex;
-  gap: 8px;
   justify-content: flex-end;
-}
-
-.auth-user {
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .icon-button {
@@ -541,38 +419,10 @@ select {
   color: var(--ink);
 }
 
-input[type="range"] {
-  min-height: 38px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  accent-color: var(--orange);
-}
-
 input:focus,
 select:focus {
   border-color: var(--cyan);
   box-shadow: 0 0 0 3px rgba(31, 142, 165, 0.12);
-}
-
-input[type="range"]:focus {
-  box-shadow: none;
-}
-
-input[type="range"]:focus-visible {
-  outline: 2px solid rgba(31, 142, 165, 0.48);
-  outline-offset: 3px;
-}
-
-.number-slider {
-  display: grid;
-  grid-template-columns: minmax(88px, 0.42fr) minmax(120px, 1fr);
-  gap: 8px;
-  align-items: center;
-}
-
-.number-slider input[type="number"] {
-  min-width: 0;
 }
 
 .check {

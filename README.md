@@ -450,58 +450,6 @@ If this is your first time running Hyping on this machine, use this sequence:
 
 If scan results are incomplete, permissions or network restrictions may be the reason. On macOS, active ARP scanning usually requires `sudo`; the default Bettercap scanner also requires a running local Bettercap REST API.
 
-### Web UI with Passkey-Auth gate
-
-The Web UI can require a Passkey-Auth login before any Hyping API is usable.
-By default, Hyping redirects the browser to Passkey-Auth's logo OAuth page,
-lets Passkey-Auth run the Passkey verification there, then receives the OAuth
-callback and issues its own short HttpOnly session cookie.
-
-Start Passkey-Auth with an origin that matches the Auth page itself, and allow
-the Hyping callback URL:
-
-```bash
-cd ../Passkey-Auth
-PORT=5003 \
-PASSKEY_ORIGIN=http://localhost:5003 \
-PASSKEY_RP_ID=localhost \
-PASSKEY_OAUTH_DEMO_REDIRECT_URI=http://localhost:8765/api/auth/callback \
-PASSKEY_OAUTH_DEMO_CLIENT_SECRET=change-this-client-secret \
-.venv/bin/python -m passkey_demo.app
-```
-
-Then start Hyping Web UI with the same OAuth client secret kept on the backend:
-
-```bash
-cd ../hyping-network-tools
-HYPING_WEB_AUTH_ENABLED=1 \
-HYPING_PASSKEY_AUTH_FLOW=redirect \
-HYPING_PASSKEY_AUTH_BASE_URL=http://localhost:5003 \
-HYPING_PASSKEY_AUTH_CALLBACK_URL=http://localhost:8765/api/auth/callback \
-HYPING_PASSKEY_AUTH_CLIENT_ID=passkey-demo-client \
-HYPING_PASSKEY_AUTH_CLIENT_SECRET=change-this-client-secret \
-PYTHONPATH=src python -m hyping.main web --port 8765
-```
-
-Open `http://localhost:8765`. Clicking the Passkey button jumps to
-Passkey-Auth, shows its logo page, completes verification, then returns to
-Hyping.
-
-`PASSKEY_OAUTH_DEMO_REDIRECT_URI` and `HYPING_PASSKEY_AUTH_CALLBACK_URL` must
-be exactly the same string. `localhost` and `127.0.0.1` are different for this
-check.
-
-For LAN access from other devices, use HTTPS origins for both Auth and Hyping,
-and set `PASSKEY_ORIGIN` to the Auth HTTPS origin. Also set
-`PASSKEY_OAUTH_DEMO_REDIRECT_URI` to the exact Hyping HTTPS callback URL.
-Plain `http://<lan-ip>:8765` is not a WebAuthn secure context, so browsers will
-refuse Passkey operations.
-
-If you prefer the older no-redirect behavior, set
-`HYPING_PASSKEY_AUTH_FLOW=proxy` and configure
-`HYPING_PASSKEY_AUTH_SERVER_API_TOKEN` to match Passkey-Auth's
-`PASSKEY_SERVER_API_TOKEN`.
-
 ### The easiest way to use it
 
 Start the interactive UI:
