@@ -6,38 +6,7 @@
     <title>Hyping Web UI</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
-  <body class="auth-locked">
-    <section class="auth-gate" id="auth-gate" aria-label="Passkey 登录">
-      <div class="auth-card">
-        <div class="auth-brand">
-          <span class="brand-mark">H</span>
-          <div>
-            <strong>Hyping</strong>
-            <span>Passkey Gate</span>
-          </div>
-        </div>
-        <div class="auth-copy">
-          <p class="eyebrow">Secure Console</p>
-          <h1>使用 Passkey 解锁</h1>
-          <p>完成 Passkey-Auth 验证后进入局域网控制台。</p>
-        </div>
-        <form class="auth-form" id="auth-form">
-          <label>用户名
-            <input
-              name="username"
-              autocomplete="username webauthn"
-              placeholder="留空使用已注册 Passkey"
-            />
-          </label>
-          <button class="primary" type="submit">使用 Passkey 登录</button>
-        </form>
-        <p class="auth-status" id="auth-status" hidden></p>
-        <div class="auth-meta">
-          <span>Auth</span>
-          <strong id="auth-provider">Passkey-Auth</strong>
-        </div>
-      </div>
-    </section>
+  <body>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
@@ -92,7 +61,6 @@
             <span>权限: <strong id="ctx-permission">-</strong></span>
           </div>
           <div class="top-actions">
-            <button class="secondary auth-user" id="auth-logout" hidden></button>
             <button class="icon-button" id="refresh-all" title="刷新状态">
               <span class="refresh-icon"></span>
             </button>
@@ -495,22 +463,6 @@
                 <label>TCP 端口<input id="set-load-port" type="number" /></label>
                 <label>并发<input id="set-load-concurrency" type="number" /></label>
                 <label>时长秒<input id="set-load-duration" type="number" step="0.5" /></label>
-              </div>
-              <div>
-                <h3>Passkey Auth</h3>
-                <label class="check"><input id="set-auth-enabled" type="checkbox" /> 启用 WebUI 门禁</label>
-                <label>登录方式
-                  <select id="set-auth-flow">
-                    <option value="redirect">跳转到 Auth 页面</option>
-                    <option value="proxy">当前页 Challenge</option>
-                  </select>
-                </label>
-                <label>Auth 地址<input id="set-auth-base-url" placeholder="http://localhost:5003" /></label>
-                <label>Callback URL<input id="set-auth-callback-url" placeholder="http://localhost:8765/api/auth/callback" /></label>
-                <label>Client ID<input id="set-auth-client-id" /></label>
-                <label>Client Secret<input id="set-auth-client-secret" type="password" /></label>
-                <label>默认用户名<input id="set-auth-username" placeholder="可选" /></label>
-                <label>Server token<input id="set-auth-token" type="password" /></label>
               </div>
             </div>
             <div class="activity-log" id="settings-log"></div>
