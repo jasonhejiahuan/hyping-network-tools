@@ -1314,6 +1314,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
                     body.get("start_discovery"),
                     _bool_value(bettercap.get("start_discovery"), True),
                 ),
+                include_cached=False,
                 discovery_warmup=_float_value(
                     body.get("discovery_warmup"),
                     _float_value(bettercap.get("discovery_warmup"), 3.0),
@@ -1322,6 +1323,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
                     f"{module} 正在启动，等待预热..."
                 ),
             )
+            logs.append("已排除扫描前的 Bettercap 会话缓存。")
             records = [_scan_item_to_record(host) for host in hosts]
         else:
             network = str(body.get("network", scan_config.get("network", "auto")))

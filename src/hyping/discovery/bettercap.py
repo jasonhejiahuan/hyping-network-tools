@@ -505,6 +505,7 @@ def iter_bettercap_hosts(
     wait: float = 5.0,
     poll_interval: float = 0.5,
     start_discovery: bool = True,
+    include_cached: bool = True,
     discovery_warmup: float = 3.0,
     on_discovery_starting: Callable[[str], None] | None = None,
 ) -> Iterator[BettercapHost]:
@@ -515,7 +516,8 @@ def iter_bettercap_hosts(
         msg = "poll_interval must be greater than 0"
         raise ValueError(msg)
 
-    latest_hosts = client.hosts()
+    cached_hosts = client.hosts()
+    baseline = {} if include_cached else {host.ip: host for host in cached_hosts}
     if start_discovery:
         try:
             client.start_discovery(
@@ -529,10 +531,13 @@ def iter_bettercap_hosts(
 
     deadline = time.monotonic() + wait
     seen: set[IPv4Address] = set()
+    latest_hosts = client.hosts()
 
     while True:
         for host in latest_hosts:
             if host.ip in seen:
+                continue
+            if baseline.get(host.ip) == host:
                 continue
             seen.add(host.ip)
             yield host
@@ -549,6 +554,7 @@ def list_bettercap_hosts(
     wait: float = 5.0,
     poll_interval: float = 0.5,
     start_discovery: bool = True,
+    include_cached: bool = True,
     discovery_warmup: float = 3.0,
     on_discovery_starting: Callable[[str], None] | None = None,
     on_host: Callable[[BettercapHost], None] | None = None,
@@ -559,6 +565,7 @@ def list_bettercap_hosts(
         wait=wait,
         poll_interval=poll_interval,
         start_discovery=start_discovery,
+        include_cached=include_cached,
         discovery_warmup=discovery_warmup,
         on_discovery_starting=on_discovery_starting,
     ):

@@ -140,6 +140,54 @@ class BettercapTests(unittest.TestCase):
             ["192.168.1.20", "192.168.1.21"],
         )
 
+    def test_iter_bettercap_hosts_can_exclude_unchanged_cached_hosts(self) -> None:
+        cached = BettercapHost(
+            ip=IPv4Address("192.168.1.20"),
+            mac="aa:bb:cc:dd:ee:20",
+            hostname="cached.local",
+            last_seen="2026-06-19T10:00:00Z",
+        )
+        refreshed = BettercapHost(
+            ip=cached.ip,
+            mac=cached.mac,
+            hostname=cached.hostname,
+            last_seen="2026-06-19T10:01:00Z",
+        )
+        discovered = BettercapHost(
+            ip=IPv4Address("192.168.1.21"),
+            mac="aa:bb:cc:dd:ee:21",
+            hostname="new.local",
+        )
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def start_discovery(self):
+                return None
+
+            def hosts(self):
+                self.calls += 1
+                if self.calls < 3:
+                    return [cached]
+                return [refreshed, discovered]
+
+        with patch("hyping.discovery.bettercap.time.sleep", lambda _: None):
+            hosts = list(
+                iter_bettercap_hosts(
+                    Client(),
+                    wait=0.01,
+                    poll_interval=0.01,
+                    include_cached=False,
+                )
+            )
+
+        self.assertEqual(
+            [str(host.ip) for host in hosts],
+            ["192.168.1.20", "192.168.1.21"],
+        )
+        self.assertEqual(hosts[0].last_seen, "2026-06-19T10:01:00Z")
+
     def test_client_online_check_returns_false_when_api_unreachable(self) -> None:
         client = BettercapClient()
 
