@@ -32,6 +32,32 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config["load"]["concurrency"], 32)
             self.assertEqual(config["bettercap"]["url"], "http://127.0.0.1:8081")
 
+    def test_ensure_config_migrates_legacy_passkey_client_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "web_auth": {
+                            "client_id": "passkey-demo-client",
+                            "client_secret": "passkey-demo-secret",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = ensure_config(path)
+
+            self.assertEqual(
+                config["web_auth"]["client_id"],
+                "jstu-passkey-client",
+            )
+            self.assertEqual(
+                config["web_auth"]["client_secret"],
+                "jstu-passkey-secret",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

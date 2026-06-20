@@ -12,6 +12,10 @@ from hyping.paths import (
 )
 
 DEFAULT_CONFIG_PATH = CONFIG_PATH
+LEGACY_PASSKEY_CLIENT_ID = "passkey-demo-client"
+DEFAULT_PASSKEY_CLIENT_ID = "jstu-passkey-client"
+LEGACY_PASSKEY_CLIENT_SECRET = "passkey-demo-secret"
+DEFAULT_PASSKEY_CLIENT_SECRET = "jstu-passkey-secret"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "bettercap": {
@@ -79,8 +83,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "login_flow": "redirect",
         "auth_base_url": "http://localhost:5003",
         "callback_url": "",
-        "client_id": "passkey-demo-client",
-        "client_secret": "passkey-demo-secret",
+        "client_id": DEFAULT_PASSKEY_CLIENT_ID,
+        "client_secret": DEFAULT_PASSKEY_CLIENT_SECRET,
         "server_api_token": "",
         "username": "",
         "session_ttl_seconds": 3600,
@@ -130,7 +134,19 @@ def ensure_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
         msg = f"invalid config format: {path}"
         raise ValueError(msg)
 
-    return _deep_merge(DEFAULT_CONFIG, data)
+    config = _deep_merge(DEFAULT_CONFIG, data)
+    web_auth = config.get("web_auth")
+    if (
+        isinstance(web_auth, dict)
+        and web_auth.get("client_id") == LEGACY_PASSKEY_CLIENT_ID
+    ):
+        web_auth["client_id"] = DEFAULT_PASSKEY_CLIENT_ID
+    if (
+        isinstance(web_auth, dict)
+        and web_auth.get("client_secret") == LEGACY_PASSKEY_CLIENT_SECRET
+    ):
+        web_auth["client_secret"] = DEFAULT_PASSKEY_CLIENT_SECRET
+    return config
 
 
 def save_config(config: Mapping[str, Any], path: Path = DEFAULT_CONFIG_PATH) -> None:

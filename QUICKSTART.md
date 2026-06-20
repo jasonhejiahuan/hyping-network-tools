@@ -42,3 +42,6 @@ PYTHONPATH=src python -m hyping.main web --host 0.0.0.0 --port 8765
 ```text
 http://<本机 IP>:8765
 ```
+
+完整的设备发现、WebUI Passkey 接入、配置与故障排查说明见
+[项目 Wiki](https://github.com/jasonhejiahuan/hyping-network-tools/wiki)。

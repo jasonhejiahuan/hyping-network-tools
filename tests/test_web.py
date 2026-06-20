@@ -80,8 +80,8 @@ class FakePasskeyAuthHandler(BaseHTTPRequestHandler):
         if self.path == "/oauth/token":
             self.server.token_requests.append(payload)
             authenticated = (
-                payload.get("client_id") == "passkey-demo-client"
-                and payload.get("client_secret") == "passkey-demo-secret"
+                payload.get("client_id") == "jstu-passkey-client"
+                and payload.get("client_secret") == "jstu-passkey-secret"
                 and payload.get("code") == "code-123"
             )
             if not authenticated:
@@ -365,8 +365,8 @@ class WebServerTests(unittest.TestCase):
                     "login_flow": "redirect",
                     "auth_base_url": f"http://{host}:{port}",
                     "callback_url": "http://localhost:8765/api/auth/callback",
-                    "client_id": "passkey-demo-client",
-                    "client_secret": "passkey-demo-secret",
+                    "client_id": "jstu-passkey-client",
+                    "client_secret": "jstu-passkey-secret",
                     "session_ttl_seconds": 600,
                     "challenge_ttl_seconds": 60,
                     "request_timeout": 2,
@@ -386,7 +386,7 @@ class WebServerTests(unittest.TestCase):
             }
             self.assertEqual(parsed.path, "/oauth/authorize")
             self.assertEqual(params["response_type"], "code")
-            self.assertEqual(params["client_id"], "passkey-demo-client")
+            self.assertEqual(params["client_id"], "jstu-passkey-client")
             self.assertEqual(
                 params["redirect_uri"],
                 "http://localhost:8765/api/auth/callback",
@@ -418,6 +418,31 @@ class WebServerTests(unittest.TestCase):
             fake_thread.join(timeout=2)
             fake_auth.server_close()
 
+    def test_passkey_auth_error_callback_returns_to_login_view(self) -> None:
+        redirect = self.get_no_redirect("/api/auth/login?next=/devices?tab=all")
+        params = {
+            key: values[0]
+            for key, values in parse_qs(
+                urlsplit(redirect.headers["Location"]).query
+            ).items()
+        }
+        error_query = urlencode(
+            {
+                "state": params["state"],
+                "error": "invalid_client",
+                "error_description": "OAuth client 校验失败",
+            }
+        )
+
+        callback = self.get_no_redirect(f"/api/auth/error?{error_query}")
+
+        self.assertEqual(callback.code, 303)
+        location = urlsplit(callback.headers["Location"])
+        self.assertEqual(location.path, "/devices")
+        returned = parse_qs(location.query)
+        self.assertEqual(returned["tab"], ["all"])
+        self.assertEqual(returned["auth_error"], ["OAuth client 校验失败"])
+
     def test_redirect_flow_canonicalizes_loopback_callback_to_localhost(self) -> None:
         fake_auth = FakePasskeyAuthServer()
         fake_thread = threading.Thread(
@@ -432,8 +457,8 @@ class WebServerTests(unittest.TestCase):
                     "enabled": True,
                     "login_flow": "redirect",
                     "auth_base_url": f"http://{host}:{port}",
-                    "client_id": "passkey-demo-client",
-                    "client_secret": "passkey-demo-secret",
+                    "client_id": "jstu-passkey-client",
+                    "client_secret": "jstu-passkey-secret",
                     "session_ttl_seconds": 600,
                     "challenge_ttl_seconds": 60,
                     "request_timeout": 2,

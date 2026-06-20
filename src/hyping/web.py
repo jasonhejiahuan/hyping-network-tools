@@ -770,6 +770,9 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         if path == "/api/auth/callback":
             self._auth_callback(query)
             return
+        if path == "/api/auth/error":
+            self._auth_error_callback(query)
+            return
         if path == "/api/status":
             self.server.config = _load_runtime_config(self.server.config)
             self._send_json(
@@ -1005,6 +1008,21 @@ class HypingWebHandler(BaseHTTPRequestHandler):
                     secure=self._request_is_secure(),
                 )
             },
+        )
+
+    def _auth_error_callback(self, query: Mapping[str, list[str]]) -> None:
+        state = query.get("state", [""])[0]
+        state_payload = _verify_auth_payload(state, self.server.auth_session_secret)
+        if state_payload is None:
+            self._send_redirect("/?auth_error=invalid_state")
+            return
+
+        next_path = self._safe_next_path(str(state_payload.get("next") or "/"))
+        description = query.get("error_description", [""])[0].strip()
+        error = query.get("error", ["oauth_failed"])[0].strip()
+        message = description or error or "Passkey 登录失败"
+        self._send_redirect(
+            self._url_with_params(next_path, {"auth_error": message})
         )
 
     def _auth_options(self, body: dict[str, Any]) -> dict[str, Any]:
