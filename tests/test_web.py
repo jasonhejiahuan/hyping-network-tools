@@ -6,6 +6,7 @@ import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -419,7 +420,8 @@ class WebServerTests(unittest.TestCase):
             fake_auth.server_close()
 
     def test_passkey_auth_error_callback_returns_to_login_view(self) -> None:
-        redirect = self.get_no_redirect("/api/auth/login?next=/devices?tab=all")
+        with patch("hyping.web._ensure_passkey_auth_available"):
+            redirect = self.get_no_redirect("/api/auth/login?next=/devices?tab=all")
         params = {
             key: values[0]
             for key, values in parse_qs(
@@ -442,6 +444,34 @@ class WebServerTests(unittest.TestCase):
         returned = parse_qs(location.query)
         self.assertEqual(returned["tab"], ["all"])
         self.assertEqual(returned["auth_error"], ["OAuth client 校验失败"])
+
+    def test_redirect_flow_keeps_offline_auth_error_in_hyping(self) -> None:
+        unavailable = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        host, port = unavailable.server_address
+        unavailable.server_close()
+        self.restart_hyping(
+            {
+                "web_auth": {
+                    "enabled": True,
+                    "login_flow": "redirect",
+                    "auth_base_url": f"http://{host}:{port}",
+                    "client_id": "jstu-passkey-client",
+                    "request_timeout": 0.1,
+                }
+            }
+        )
+
+        redirect = self.get_no_redirect("/api/auth/login?next=/devices?tab=all")
+
+        self.assertEqual(redirect.code, 303)
+        location = urlsplit(redirect.headers["Location"])
+        self.assertEqual(location.path, "/devices")
+        returned = parse_qs(location.query)
+        self.assertEqual(returned["tab"], ["all"])
+        self.assertEqual(
+            returned["auth_error"],
+            ["无法连接 Passkey-Auth，请确认服务已启动后重试"],
+        )
 
     def test_redirect_flow_canonicalizes_loopback_callback_to_localhost(self) -> None:
         fake_auth = FakePasskeyAuthServer()
