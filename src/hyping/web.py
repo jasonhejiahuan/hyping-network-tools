@@ -448,6 +448,36 @@ def _passkey_auth_url(auth_config: Mapping[str, Any], path: str) -> str:
     return f"{base_url.rstrip('/')}{path}"
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: object, **kwargs: object):
+        return None
+
+
+def _ensure_passkey_auth_available(auth_config: Mapping[str, Any]) -> None:
+    request = urllib.request.Request(
+        _passkey_auth_url(auth_config, "/"),
+        headers={"Accept": "text/html,application/json"},
+        method="HEAD",
+    )
+    timeout = _float_value(auth_config.get("request_timeout"), 5.0)
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    try:
+        with opener.open(request, timeout=timeout):
+            return
+    except urllib.error.HTTPError as exc:
+        if exc.code not in {
+            HTTPStatus.BAD_GATEWAY,
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            HTTPStatus.GATEWAY_TIMEOUT,
+        }:
+            return
+        msg = "Passkey-Auth 服务暂时不可用，请确认服务已启动后重试"
+        raise ValueError(msg) from exc
+    except urllib.error.URLError as exc:
+        msg = "无法连接 Passkey-Auth，请确认服务已启动后重试"
+        raise ValueError(msg) from exc
+
+
 def _read_json_response(response) -> dict[str, Any]:
     raw = response.read()
     if not raw:
@@ -924,8 +954,9 @@ class HypingWebHandler(BaseHTTPRequestHandler):
 
     def _auth_login(self, query: Mapping[str, list[str]]) -> None:
         self.server.config = _load_runtime_config(self.server.config)
+        next_path = self._safe_next_path(query.get("next", [""])[0])
         if not _web_auth_enabled(self.server.config):
-            self._send_redirect(self._safe_next_path(query.get("next", [""])[0]))
+            self._send_redirect(next_path)
             return
         if _web_auth_login_flow(self.server.config) != "redirect":
             msg = "当前 WebUI 认证不是 redirect flow"
@@ -936,6 +967,13 @@ class HypingWebHandler(BaseHTTPRequestHandler):
         if client_id is None:
             msg = "Passkey-Auth client_id 未配置"
             raise ValueError(msg)
+        try:
+            _ensure_passkey_auth_available(auth_config)
+        except ValueError as exc:
+            self._send_redirect(
+                self._url_with_params(next_path, {"auth_error": str(exc)})
+            )
+            return
 
         now = int(time.time())
         state = _sign_auth_payload(
@@ -944,7 +982,7 @@ class HypingWebHandler(BaseHTTPRequestHandler):
                 "exp": now
                 + int(_float_value(auth_config.get("challenge_ttl_seconds"), 300.0)),
                 "nonce": secrets.token_urlsafe(16),
-                "next": self._safe_next_path(query.get("next", [""])[0]),
+                "next": next_path,
             },
             self.server.auth_session_secret,
         )
