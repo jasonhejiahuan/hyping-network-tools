@@ -21,6 +21,33 @@ hyping ui
 
 ## 启动 Web UI
 
+WebUI 默认启用 Passkey 验证。启动前请选择一种方式：
+
+1. 下载并启动同作者的
+   [jasonhejiahuan/Passkey-Auth](https://github.com/jasonhejiahuan/Passkey-Auth)。
+   启动方法与 OAuth 参数配置请参考
+   [Passkey-Auth Quick Start](https://github.com/jasonhejiahuan/Passkey-Auth/wiki/Quick-Start)
+   和
+   [Deployment](https://github.com/jasonhejiahuan/Passkey-Auth/wiki/Deployment)。
+2. 如果暂时不需要登录门禁，在 `HypingData/hyping-config.json` 中设置：
+
+   ```json
+   {
+     "web_auth": {
+       "enabled": false
+     }
+   }
+   ```
+
+   也可以只为本次启动关闭：
+
+   ```bash
+   HYPING_WEB_AUTH_ENABLED=0 \
+   PYTHONPATH=src python -m hyping.main web --port 8765
+   ```
+
+完成上述任一项后，再启动 WebUI：
+
 ```bash
 PYTHONPATH=src python -m hyping.main web --port 8765
 ```

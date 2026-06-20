@@ -42,6 +42,36 @@ PYTHONPATH=src python -m hyping.main ui
 hyping ui
 ```
 
+### 启动 WebUI 前
+
+WebUI 默认启用 Passkey 验证。启动前必须选择以下一种方式：
+
+1. 下载并启动同作者的
+   [jasonhejiahuan/Passkey-Auth](https://github.com/jasonhejiahuan/Passkey-Auth)，
+   并按照
+   [Quick Start](https://github.com/jasonhejiahuan/Passkey-Auth/wiki/Quick-Start)
+   与
+   [Deployment](https://github.com/jasonhejiahuan/Passkey-Auth/wiki/Deployment)
+   配置启动参数和 Hyping OAuth callback。
+2. 如果不需要登录门禁，在 `HypingData/hyping-config.json` 中将
+   `web_auth.enabled` 设为 `false`：
+
+   ```json
+   {
+     "web_auth": {
+       "enabled": false
+     }
+   }
+   ```
+
+   临时关闭可以使用：
+
+   ```bash
+   HYPING_WEB_AUTH_ENABLED=0 \
+   PYTHONPATH=src python -m hyping.main web --port 8765
+   ```
+
+未运行 Passkey-Auth 且未关闭门禁时，WebUI 可以启动，但无法完成登录。
 
 ### 首次启动指南
 
@@ -455,10 +485,23 @@ If scan results are incomplete, permissions or network restrictions may be the r
 
 ### Web UI with Passkey-Auth gate
 
-The Web UI can require a Passkey-Auth login before any Hyping API is usable.
-By default, Hyping redirects the browser to Passkey-Auth's logo OAuth page,
-lets Passkey-Auth run the Passkey verification there, then receives the OAuth
-callback and issues its own short HttpOnly session cookie.
+The Web UI enables Passkey authentication by default. Before starting it,
+either download and run
+[jasonhejiahuan/Passkey-Auth](https://github.com/jasonhejiahuan/Passkey-Auth),
+or set `web_auth.enabled` to `false` in
+`HypingData/hyping-config.json`. For a one-off unauthenticated launch, set
+`HYPING_WEB_AUTH_ENABLED=0`.
+
+See the Passkey-Auth
+[Quick Start](https://github.com/jasonhejiahuan/Passkey-Auth/wiki/Quick-Start)
+and
+[Deployment](https://github.com/jasonhejiahuan/Passkey-Auth/wiki/Deployment)
+pages for startup commands and OAuth parameters.
+
+When enabled, Hyping redirects the browser to Passkey-Auth's logo OAuth page,
+lets Passkey-Auth run Passkey verification there, then receives the OAuth
+callback and issues its own short HttpOnly session cookie. If Passkey-Auth is
+not running, the Web UI starts but login cannot complete.
 
 Start Passkey-Auth with an origin that matches the Auth page itself, and allow
 the Hyping callback URL:

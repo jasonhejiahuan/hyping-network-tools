@@ -8,11 +8,24 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hyping.discovery.bettercap import BettercapHost
-from hyping.main import _resolve_auto_locate_hostname, main
+from hyping.main import _build_parser, _resolve_auto_locate_hostname, main
 from hyping.storage import save_device_records
 
 
 class MainAutoLocateTests(unittest.TestCase):
+    def test_web_help_explains_passkey_prerequisite(self) -> None:
+        parser = _build_parser({})
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["web", "--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("jasonhejiahuan/Passkey-Auth", help_text)
+        self.assertIn("web_auth.enabled=false", help_text)
+        self.assertIn("github.com/jasonhejiahuan/Passkey-Auth/wiki", help_text)
+
     def test_resolve_auto_locate_hostname_uses_saved_selector(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store_path = Path(directory) / "devices.json"

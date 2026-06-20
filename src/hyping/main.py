@@ -836,6 +836,15 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
     web = subparsers.add_parser(
         "web",
         help="start the local Web UI",
+        description=(
+            "启动本地 WebUI。默认启用 Passkey 验证，需要先运行 "
+            "jasonhejiahuan/Passkey-Auth，或在配置中设置 "
+            "web_auth.enabled=false。"
+        ),
+        epilog=(
+            "Passkey-Auth 启动与参数文档："
+            "https://github.com/jasonhejiahuan/Passkey-Auth/wiki"
+        ),
     )
     web.add_argument(
         "--host",
