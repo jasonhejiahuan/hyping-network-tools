@@ -315,11 +315,30 @@ def _record_hostname(record: DeviceRecord) -> str | None:
     return cleaned or None
 
 
-def _save_record(store_path: Path, record: DeviceRecord) -> None:
+def _save_records(store_path: Path, new_records: list[DeviceRecord]) -> None:
     records = load_device_records(store_path)
-    upsert_device_record(records, record)
-    save_device_records(records, store_path)
-    print(f"已保存到 {store_path}")
+    saved_count = 0
+    refresh_in_place = sys.stdout.isatty()
+
+    for record in new_records:
+        records = upsert_device_record(records, record)
+        save_device_records(records, store_path)
+        saved_count += 1
+        if refresh_in_place:
+            print(
+                f"\r\033[2K已保存 {saved_count} 项到 {store_path}",
+                end="",
+                flush=True,
+            )
+
+    if refresh_in_place:
+        print()
+    else:
+        print(f"已保存 {saved_count} 项到 {store_path}")
+
+
+def _save_record(store_path: Path, record: DeviceRecord) -> None:
+    _save_records(store_path, [record])
 
 
 def _note_hosts_with_current(
@@ -432,7 +451,8 @@ def _located_devices_action_flow(
             choice = _ask("输入编号", "1")
         except BackRequested:
             return current
-        _clear_screen()
+        if choice != "3":
+            _clear_screen()
 
         if choice == "1":
             try:
@@ -456,8 +476,7 @@ def _located_devices_action_flow(
             _pause()
             _clear_screen()
         elif choice == "3":
-            for record in records:
-                _save_record(store_path, record)
+            _save_records(store_path, records)
             _pause()
             _clear_screen()
         elif choice == "4":
