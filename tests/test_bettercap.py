@@ -101,6 +101,18 @@ class BettercapTests(unittest.TestCase):
         self.assertEqual(record["hostname"], "printer.local")
         self.assertEqual(record["vendor"], "Printer Inc.")
 
+    def test_record_from_bettercap_host_preserves_meta_for_fingerprint(self) -> None:
+        meta = {"values": {"mdns:model": "Printer X"}}
+        record = record_from_bettercap_host(
+            BettercapHost(
+                ip=IPv4Address("192.168.1.20"),
+                mac="aa:bb:cc:dd:ee:20",
+                meta=meta,
+            )
+        )
+
+        self.assertEqual(record["bettercap_meta"], meta)
+
     def test_iter_bettercap_hosts_starts_discovery_and_yields_new_hosts(self) -> None:
         class Client:
             def __init__(self):

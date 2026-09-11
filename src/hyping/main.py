@@ -43,7 +43,14 @@ from hyping.discovery.wifi import (
 )
 from hyping.interactive import run_interactive
 from hyping.loadtest import LoadTestConfig, run_load_test
-from hyping.storage import DEFAULT_STORE_PATH, DeviceRecord, load_device_records
+from hyping.storage import (
+    DEFAULT_STORE_PATH,
+    DeviceRecord,
+    load_device_records,
+    mac_addresses_from_record,
+    normalize_mac_address,
+)
+from hyping.tracking import track_device_across_wifi
 from hyping.web import run_web
 
 
@@ -216,6 +223,44 @@ def _select_saved_hostname_record(
     return matches[0]
 
 
+def _select_saved_device_record(
+    records: Sequence[DeviceRecord],
+    selector: str | None,
+) -> DeviceRecord:
+    if not records:
+        raise ValueError("没有已保存设备")
+    if selector is None or not selector.strip():
+        if len(records) == 1:
+            return records[0]
+        raise ValueError("找到多个已保存设备，请使用 --saved 指定编号或设备标识")
+
+    cleaned = selector.strip()
+    if cleaned.isdecimal():
+        index = int(cleaned) - 1
+        if 0 <= index < len(records):
+            return records[index]
+        raise ValueError(f"找不到编号 {cleaned} 的已保存设备")
+
+    normalized = _normalize_saved_selector(cleaned)
+    normalized_mac = normalize_mac_address(cleaned)
+    matches: list[DeviceRecord] = []
+    for record in records:
+        values = [
+            _record_text(record, key) for key in ("hostname", "note", "ip", "mac")
+        ]
+        values.extend(mac_addresses_from_record(record))
+        if normalized_mac in mac_addresses_from_record(record) or any(
+            value is not None and _normalize_saved_selector(value) == normalized
+            for value in values
+        ):
+            matches.append(record)
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ValueError(f"找不到匹配 {cleaned!r} 的已保存设备")
+    raise ValueError(f"{cleaned!r} 匹配到多台保存设备，请改用编号")
+
+
 def _resolve_auto_locate_hostname(
     *,
     hostname: str | None,
@@ -266,6 +311,7 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
     mdns_config = config.get("mdns", {})
     wifi_config = config.get("wifi", {})
     auto_wifi_config = config.get("auto_wifi_scan", {})
+    tracking_config = config.get("tracking", {})
 
     parser = argparse.ArgumentParser(
         prog="hyping",
@@ -821,6 +867,138 @@ def _build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentP
         help="print JSON summary",
     )
 
+    track = subparsers.add_parser(
+        "track-device",
+        aliases=["track"],
+        help="continuously enumerate Wi-Fi locations and lock a saved device",
+    )
+    track.add_argument(
+        "--saved",
+        nargs="?",
+        const="",
+        required=True,
+        metavar="SELECTOR",
+        help="saved-device number, hostname, note, IP, or current/historical MAC",
+    )
+    track.add_argument(
+        "--scanner",
+        choices=["bettercap", "builtin"],
+        default=tracking_config.get("scanner", "bettercap"),
+        help="discovery backend used on every Wi-Fi",
+    )
+    track.add_argument(
+        "--wifi-list",
+        type=Path,
+        default=expand_wifi_rotation_path(
+            auto_wifi_config.get("wifi_list", str(DEFAULT_WIFI_ROTATION_PATH))
+        ),
+        help="JSON or CSV file containing SSIDs to enumerate",
+    )
+    track.add_argument("--store", type=Path, default=DEFAULT_STORE_PATH)
+    track.add_argument(
+        "--interface",
+        default=wifi_config.get("interface"),
+        help="Wi-Fi interface; defaults to auto-detection",
+    )
+    track.add_argument(
+        "--round-interval",
+        type=float,
+        default=tracking_config.get("round_interval", 5.0),
+        help="seconds between complete Wi-Fi enumeration rounds",
+    )
+    track.add_argument(
+        "--max-rounds",
+        type=int,
+        default=tracking_config.get("max_rounds", 0),
+        help="maximum rounds; 0 keeps tracking until found or interrupted",
+    )
+    track.add_argument(
+        "--restore-original-on-failure",
+        action=argparse.BooleanOptionalAction,
+        default=tracking_config.get("restore_original_on_failure", True),
+        help="restore the original Wi-Fi when tracking stops without a match",
+    )
+    track.add_argument(
+        "--fingerprint-association",
+        action=argparse.BooleanOptionalAction,
+        default=tracking_config.get("fingerprint_association", True),
+        help="associate a changed random MAC only from unique high-confidence evidence",
+    )
+    track.add_argument(
+        "--fingerprint-threshold",
+        type=int,
+        default=tracking_config.get("fingerprint_threshold", 70),
+        help="minimum fingerprint score from 0 to 100; defaults to 70",
+    )
+    track.add_argument(
+        "--fingerprint-margin",
+        type=int,
+        default=tracking_config.get("fingerprint_margin", 15),
+        help="minimum score lead over the next candidate; defaults to 15",
+    )
+    track.add_argument(
+        "--create-template",
+        action=argparse.BooleanOptionalAction,
+        default=auto_wifi_config.get("create_template", True),
+    )
+    track.add_argument(
+        "--bettercap-url", default=bettercap_config.get("url", "http://127.0.0.1:8081")
+    )
+    track.add_argument(
+        "--bettercap-user", default=bettercap_config.get("username", "user")
+    )
+    track.add_argument(
+        "--bettercap-pass", default=bettercap_config.get("password", "pass")
+    )
+    track.add_argument(
+        "--bettercap-api-timeout",
+        type=float,
+        default=bettercap_config.get("api_timeout", 3.0),
+    )
+    track.add_argument(
+        "--bettercap-online-check-timeout",
+        type=float,
+        default=bettercap_config.get("online_check_timeout", 0.25),
+    )
+    track.add_argument(
+        "--bettercap-command", default=bettercap_config.get("command", "bettercap")
+    )
+    track.add_argument(
+        "--bettercap-startup-timeout",
+        type=float,
+        default=bettercap_config.get("startup_timeout", 8.0),
+    )
+    track.add_argument(
+        "--bettercap-startup-poll",
+        type=float,
+        default=bettercap_config.get("startup_poll_interval", 0.25),
+    )
+    track.add_argument(
+        "--bettercap-wait", type=float, default=bettercap_config.get("wait", 5.0)
+    )
+    track.add_argument(
+        "--bettercap-poll",
+        type=float,
+        default=bettercap_config.get("poll_interval", 0.5),
+    )
+    track.add_argument(
+        "--bettercap-discovery-warmup",
+        type=float,
+        default=bettercap_config.get("discovery_warmup", 3.0),
+    )
+    track.add_argument("--timeout", type=float, default=scan_config.get("timeout", 0.5))
+    track.add_argument("--passes", type=int, default=scan_config.get("passes", 3))
+    track.add_argument(
+        "--batch-size", type=int, default=scan_config.get("batch_size", 64)
+    )
+    track.add_argument(
+        "--interval", type=float, default=scan_config.get("interval", 0.002)
+    )
+    track.add_argument(
+        "--verify-timeout", type=float, default=wifi_config.get("verify_timeout", 12.0)
+    )
+    track.add_argument("--json", action=argparse.BooleanOptionalAction, default=False)
+
     interactive = subparsers.add_parser(
         "ui",
         aliases=["interactive"],
@@ -1059,6 +1237,94 @@ def main(argv: Sequence[str] | None = None) -> int:
             2,
             "wifi requires a subcommand: current/saved/nearby/available/switch\n",
         )
+
+    if args.command in {"track-device", "track"}:
+        try:
+            records = load_device_records(args.store)
+            selected = _select_saved_device_record(records, args.saved)
+            if args.create_template and not args.wifi_list.exists():
+                write_wifi_scan_template(args.wifi_list)
+                parser.exit(
+                    1,
+                    f"已创建 Wi-Fi 轮换配置模板：{args.wifi_list}\n"
+                    "请编辑 SSID/password 后重新运行。\n",
+                )
+            targets = load_wifi_scan_targets(args.wifi_list)
+            client = None
+            if args.scanner == "bettercap":
+                client = BettercapClient(
+                    args.bettercap_url,
+                    args.bettercap_user,
+                    args.bettercap_pass,
+                    timeout=args.bettercap_api_timeout,
+                )
+            result = track_device_across_wifi(
+                selected,
+                targets,
+                scanner=args.scanner,
+                client=client,
+                interface=args.interface,
+                bettercap_command=args.bettercap_command,
+                online_check_timeout=args.bettercap_online_check_timeout,
+                startup_timeout=args.bettercap_startup_timeout,
+                startup_poll_interval=args.bettercap_startup_poll,
+                bettercap_wait=args.bettercap_wait,
+                bettercap_poll=args.bettercap_poll,
+                discovery_warmup=args.bettercap_discovery_warmup,
+                scan_timeout=args.timeout,
+                scan_passes=args.passes,
+                scan_batch_size=args.batch_size,
+                scan_interval=args.interval,
+                verify_timeout=args.verify_timeout,
+                round_interval=args.round_interval,
+                max_rounds=args.max_rounds,
+                restore_original_on_failure=args.restore_original_on_failure,
+                fingerprint_association=args.fingerprint_association,
+                fingerprint_threshold=args.fingerprint_threshold,
+                fingerprint_margin=args.fingerprint_margin,
+                store_path=args.store,
+                on_status=None
+                if args.json
+                else lambda message: print(message, flush=True),
+            )
+        except KeyboardInterrupt:
+            if not args.json:
+                print("\n已停止持续追踪；未锁定设备。")
+            return 130
+        except (AutoWiFiScanError, BettercapAPIError, ValueError, WiFiError) as exc:
+            parser.exit(1, f"{exc}\n")
+
+        summary = {
+            "locked": result.locked,
+            "target": result.target.display_name,
+            "ssid": result.ssid,
+            "match_method": result.match_method,
+            "scanner": result.scanner,
+            "rounds": result.rounds,
+            "scanned_ssids": list(result.scanned_ssids),
+            "known_mac_addresses": list(result.target.mac_addresses),
+            "association_score": result.association_score,
+            "association_evidence": list(result.association_evidence),
+            "locations": (result.device or {}).get("locations", []),
+            "device": result.device,
+        }
+        if args.json:
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        elif result.locked:
+            print("设备追踪已锁定：")
+            print(f"目标：{result.target.display_name}")
+            print(f"位置（SSID）：{result.ssid}")
+            print(f"匹配方式：{result.match_method}")
+            if result.association_score is not None:
+                print(f"关联置信分：{result.association_score}/100")
+            for evidence in result.association_evidence:
+                print(f"  - {evidence}")
+            print("已知 MAC：" + ", ".join(result.target.mac_addresses))
+            print(f"设备库：{args.store}")
+        else:
+            print(f"完成 {result.rounds} 轮枚举，未找到设备。")
+            return 1
+        return 0
 
     if args.command in {"auto-locate", "auto-find"}:
         try:

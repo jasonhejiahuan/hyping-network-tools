@@ -60,6 +60,7 @@ from hyping.storage import (
     save_device_records,
     upsert_device_record,
 )
+from hyping.tracking import track_device_across_wifi
 
 MIN_TERMINAL_WIDTH = 72
 FAST_API_CHECK_TIMEOUT = 0.25
@@ -960,6 +961,119 @@ def _auto_hostname_search_flow(
     return found_record
 
 
+def _track_device_flow(
+    store_path: Path,
+    config: Mapping[str, Any],
+    current: DeviceRecord | None = None,
+) -> DeviceRecord | None:
+    global _NETWORK_INFO_CACHE
+
+    _title("持续追踪并锁定设备")
+    records = load_device_records(store_path)
+    selected = current
+    if selected is None:
+        selected = _choose_record(records, "输入要追踪的已保存设备编号")
+    if selected is None:
+        return current
+
+    auto_config = config.get("auto_wifi_scan", {})
+    tracking_config = config.get("tracking", {})
+    bettercap_config = config.get("bettercap", {})
+    wifi_config = config.get("wifi", {})
+    scan_config = config.get("scan", {})
+    wifi_list = expand_wifi_rotation_path(
+        str(auto_config.get("wifi_list", str(DEFAULT_WIFI_ROTATION_PATH)))
+    )
+    if not wifi_list.exists():
+        write_wifi_scan_template(wifi_list)
+        print(f"已创建 Wi-Fi 轮换配置模板：{wifi_list}")
+        print("请写入 SSID/password 后重新运行。")
+        return current
+
+    scanner = _ask(
+        "扫描后端 bettercap/builtin",
+        str(tracking_config.get("scanner", "bettercap")),
+    ).casefold()
+    if scanner not in {"bettercap", "builtin"}:
+        print("扫描后端只能是 bettercap 或 builtin。")
+        return current
+
+    targets = load_wifi_scan_targets(wifi_list)
+    print(_clip(_current_summary(selected), _terminal_width()))
+    print(f"候选位置：{', '.join(target.ssid for target in targets)}")
+    print("位置表示发现设备时的 Wi-Fi SSID；Ctrl-C 可停止持续追踪。")
+    if not _yes("开始持续枚举并在命中后自动锁定", default=True):
+        return current
+
+    client = None
+    if scanner == "bettercap":
+        client = BettercapClient(
+            str(bettercap_config.get("url", "http://127.0.0.1:8081")),
+            str(bettercap_config.get("username", "user")),
+            str(bettercap_config.get("password", "pass")),
+            timeout=float(bettercap_config.get("api_timeout", 3.0)),
+        )
+    try:
+        result = track_device_across_wifi(
+            selected,
+            targets,
+            scanner=scanner,
+            client=client,
+            interface=str(wifi_config.get("interface") or "") or None,
+            bettercap_command=str(bettercap_config.get("command", "bettercap")),
+            online_check_timeout=float(
+                bettercap_config.get("online_check_timeout", FAST_API_CHECK_TIMEOUT)
+            ),
+            startup_timeout=float(bettercap_config.get("startup_timeout", 8.0)),
+            startup_poll_interval=float(
+                bettercap_config.get("startup_poll_interval", 0.25)
+            ),
+            bettercap_wait=float(bettercap_config.get("wait", 5.0)),
+            bettercap_poll=float(bettercap_config.get("poll_interval", 0.5)),
+            discovery_warmup=float(bettercap_config.get("discovery_warmup", 3.0)),
+            scan_timeout=float(scan_config.get("timeout", 0.5)),
+            scan_passes=int(scan_config.get("passes", 3)),
+            scan_batch_size=int(scan_config.get("batch_size", 64)),
+            scan_interval=float(scan_config.get("interval", 0.002)),
+            verify_timeout=float(wifi_config.get("verify_timeout", 12.0)),
+            round_interval=float(tracking_config.get("round_interval", 5.0)),
+            max_rounds=int(tracking_config.get("max_rounds", 0)),
+            restore_original_on_failure=bool(
+                tracking_config.get("restore_original_on_failure", True)
+            ),
+            fingerprint_association=bool(
+                tracking_config.get("fingerprint_association", True)
+            ),
+            fingerprint_threshold=int(
+                tracking_config.get("fingerprint_threshold", 70)
+            ),
+            fingerprint_margin=int(tracking_config.get("fingerprint_margin", 15)),
+            store_path=store_path,
+            on_status=lambda message: print(message, flush=True),
+        )
+    except KeyboardInterrupt:
+        print("\n已停止持续追踪；未锁定设备。")
+        return current
+    except (AutoWiFiScanError, BettercapAPIError, WiFiError) as exc:
+        print(f"持续追踪失败：{exc}")
+        return current
+    finally:
+        _NETWORK_INFO_CACHE = None
+
+    if not result.locked or result.device is None:
+        print(f"完成 {result.rounds} 轮枚举，未找到设备。")
+        return current
+    print(f"已锁定：{result.target.display_name}")
+    print(f"位置（SSID）：{result.ssid}")
+    print(f"匹配方式：{result.match_method}")
+    if result.association_score is not None:
+        print(f"关联置信分：{result.association_score}/100")
+    for evidence in result.association_evidence:
+        print(f"  - {evidence}")
+    print("已知 MAC：" + ", ".join(result.target.mac_addresses))
+    return result.device
+
+
 def _wifi_flow(
     store_path: Path,
     config: Mapping[str, Any],
@@ -1564,8 +1678,9 @@ def _print_menu(
         "  4. 管理已保存设备\n"
         "  5. 并发 ping / TCP 负载测试\n"
         "  6. Wi-Fi 工具\n"
+        "  7. 持续追踪并自动锁定设备\n"
         "  r. 刷新当前网络\n"
-        "  7. 退出"
+        "  8. 退出"
     )
 
 
@@ -1640,9 +1755,12 @@ def run_interactive(
                     _pause()
                 elif choice == "6":
                     current = _wifi_flow(store_path, config, current)
+                elif choice == "7":
+                    current = _track_device_flow(store_path, config, current)
+                    _pause()
                 elif choice == "r":
                     refresh_network = True
-                elif choice == "7":
+                elif choice == "8":
                     return 0
                 else:
                     print("未知选项，请重新输入。")

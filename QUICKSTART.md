@@ -19,6 +19,22 @@ PYTHONPATH=src python -m hyping.main ui
 hyping ui
 ```
 
+## 使用 root 启动
+
+在 macOS 上，如果需要主动扫描整个网段，可使用 root 权限启动终端 UI：
+
+```bash
+sudo python3 -m hyping.main ui
+```
+
+从仓库根目录启动时可以省略 `PYTHONPATH`。也可以显式指定源码目录：
+
+```bash
+sudo PYTHONPATH=src python3 -m hyping.main ui
+```
+
+不使用 root 仍可运行 UI，并尝试 DNS、mDNS 和系统 ARP 缓存；主动 ARP 扫描可能因权限不足而跳过。
+
 ## 启动 Web UI
 
 WebUI 默认启用 Passkey 验证。启动前请选择一种方式：

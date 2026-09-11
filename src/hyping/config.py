@@ -78,6 +78,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "restore_original": True,
         "create_template": True,
     },
+    "tracking": {
+        "scanner": "bettercap",
+        "fingerprint_association": True,
+        "fingerprint_threshold": 70,
+        "fingerprint_margin": 15,
+        "round_interval": 5.0,
+        "max_rounds": 0,
+        "restore_original_on_failure": True,
+    },
     "web_auth": {
         "enabled": True,
         "login_flow": "redirect",

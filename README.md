@@ -24,6 +24,7 @@ Hyping 是一个简单的终端网络工具，用来快速找到局域网里的�
 - 自定义测试负载大小
 - 在交互界面显示当前网络和网段
 - 用一个配置文件统一修改默认参数
+- 持续轮换 Wi-Fi，通过历史 MAC/精确 hostname 追踪并自动锁定已保存设备
 
 ### 快速开始
 
@@ -162,6 +163,41 @@ Ivan
 ```
 
 ### 常用命令
+
+持续追踪一个已保存设备，自动枚举配置中的 Wi-Fi，并在发现后保持在
+命中的 SSID：
+
+```bash
+sudo PYTHONPATH=src python -m hyping.main track-device --saved "office laptop"
+```
+
+默认使用 Bettercap；也可以使用内建 ARP 扫描：
+
+```bash
+sudo PYTHONPATH=src python -m hyping.main track-device \
+  --saved "office laptop" --scanner builtin
+```
+
+设备每次在某个 SSID 被发现时，Hyping 都会在设备库中累计
+`mac_addresses` 和 `locations`。MAC 精确命中或保存的 hostname 精确命中后，
+程序会停止轮换、保持当前 Wi-Fi，并写入 `tracking.locked=true`。这里的
+“位置”指 Wi-Fi SSID，不是 GPS 地理位置。默认持续运行到找到设备或按
+Ctrl-C；可用 `--max-rounds 1` 限制为一轮。请只追踪你拥有或获准管理的设备。
+
+如果设备启用了随机 MAC，追踪还会比较 Bettercap 提供的厂商、设备型号、
+mDNS 服务类型和其他稳定元数据。只有唯一候选达到置信阈值、至少两类证据一致，
+并与第二候选拉开足够分差时，才会关联新的 MAC；IP 地址不会作为指纹证据。
+结果会保存关联分数和可读证据，方便复核。
+
+```bash
+# 默认启用保守指纹关联；可调整最低分和候选分差
+sudo PYTHONPATH=src python -m hyping.main track-device \
+  --saved "office laptop" --fingerprint-threshold 70 --fingerprint-margin 15
+
+# 完全禁用指纹关联，仅接受已知 MAC 或精确 hostname
+sudo PYTHONPATH=src python -m hyping.main track-device \
+  --saved "office laptop" --no-fingerprint-association
+```
 
 通过 hostname 查找设备：
 

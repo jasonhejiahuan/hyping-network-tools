@@ -191,7 +191,7 @@ def hosts_from_session(session: dict[str, Any]) -> list[BettercapHost]:
 
 
 def record_from_bettercap_host(host: BettercapHost) -> dict[str, Any]:
-    return {
+    record = {
         "ip": str(host.ip),
         "mac": host.mac,
         "hostname": host.display_name,
@@ -200,6 +200,9 @@ def record_from_bettercap_host(host: BettercapHost) -> dict[str, Any]:
         "first_seen": host.first_seen,
         "last_seen": host.last_seen,
     }
+    if host.meta:
+        record["bettercap_meta"] = host.meta
+    return record
 
 
 class BettercapClient:

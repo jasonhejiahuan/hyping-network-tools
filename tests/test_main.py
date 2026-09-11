@@ -13,6 +13,13 @@ from hyping.storage import save_device_records
 
 
 class MainAutoLocateTests(unittest.TestCase):
+    def test_track_device_parser_defaults_to_continuous_tracking(self) -> None:
+        args = _build_parser({}).parse_args(["track-device", "--saved", "sensor"])
+
+        self.assertEqual(args.command, "track-device")
+        self.assertEqual(args.scanner, "bettercap")
+        self.assertEqual(args.max_rounds, 0)
+
     def test_web_help_explains_passkey_prerequisite(self) -> None:
         parser = _build_parser({})
         stdout = io.StringIO()
